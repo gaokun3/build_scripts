@@ -5,7 +5,7 @@
 在华为 MateBook E Go（Snapdragon 8cx Gen 3 / sc8280xp，代号 gaokun）上跑原生 AOSP，
 最终目标是能稳定运行 arm64 手游。
 
-**当前阶段：Stage 6 M19 — ★★★★ root 跑通（ReSukiSU，`verify-root.sh` 8/8）+ chainload 实测成立 + Stage 7 设计成型。**root：主线 v7.2-rc2 非 GKI 上只需两个补丁（`asm/text-patching.h` 改名、主线删了 `strncpy()`），钩子走 tracepoint（源码零插桩），实测内核授予管理器 root、`/data/adb/ksud` 自动就位。⚠️ **只活在 ESP 的实验条目里，重启即回到不带 root 的 `android-b`** —— 还没进 ROM（TODO B11）。chainload：systemd-boot 的 `efi` 指令在本机可用，B3 那个"固件不支持"的顾虑不成立（#73）。Stage 7：救援系统与 LiveCD 合成一件事，救援不再占 24.6 GiB 分区（`docs/stage7-live-installer.md`）。⚠️ 设备上现在装着 ReSukiSU 管理器 APK。（每次开工时更新这一行）
+**当前阶段：Stage 6 M19 — ★★★★ root 跑通（ReSukiSU，`verify-root.sh` 8/8）+ chainload 实测成立 + Stage 7 设计成型。**root：主线 v7.2-rc2 非 GKI 上只需两个补丁（`asm/text-patching.h` 改名、主线删了 `strncpy()`），钩子走 tracepoint（源码零插桩），实测内核授予管理器 root、`/data/adb/ksud` 自动就位。⚠️ **只活在 ESP 的实验条目里，重启即回到不带 root 的 `android-b`** —— 还没进 ROM（TODO B11）。chainload：systemd-boot 的 `efi` 指令在本机可用，B3 那个"固件不支持"的顾虑不成立（#73）。Stage 7 M0：救援系统与 LiveCD 合成一件事，构建链已跑通 —— squashfs **55 MiB** + initramfs 648 KiB + 可启动 U 盘镜像 152 MiB（替掉 24.6 GiB 的 Ubuntu），⚠️ **还没在硬件上启动过**。⚠️ 设备上现在装着 ReSukiSU 管理器 APK。（每次开工时更新这一行）
 
 > **★★★★ Stage 6 M19（2026-08-23）：root 通了；两条"以为是版本问题"的错判。**
 > ★ **ReSukiSU 在主线 v7.2-rc2 上跑通**（据我们所知是 sc8280xp 上第一次在

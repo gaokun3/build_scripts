@@ -206,6 +206,10 @@ GUI 选型已定：**直接画 KMS + cairo/pango + libinput，不上合成器**
 （只是继续收不到 fault）。做成之后可以丢掉常驻的 `smmu-nostall.sh` 轮询。
 
 ### B7. 用轻量系统替掉救援 Ubuntu（★ 与 B4 是同一件事）
+**M0 已完成**：构建链跑通，产物 squashfs **55 MiB** + initramfs **648 KiB**
+（`scripts/live/`）。⬜ **还没在硬件上启动过** —— 下一步是从救援 Ubuntu 里
+用未分配的 64 GiB 建一个 1 GiB 分区、并列加一个启动项，ssh 验过再谈删 p3。
+
 现在 24.6 GiB 一整套 Ubuntu。设计见 [stage7-live-installer.md](stage7-live-installer.md)：
 **救援系统不再是一个分区** —— 内核 + initramfs + 一个 ≤120 MiB 的 squashfs，
 和 LiveCD 用同一套镜像（两个 profile）。
