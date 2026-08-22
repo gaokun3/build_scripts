@@ -5,7 +5,38 @@
 在华为 MateBook E Go（Snapdragon 8cx Gen 3 / sc8280xp，代号 gaokun）上跑原生 AOSP，
 最终目标是能稳定运行 arm64 手游。
 
-**当前阶段：Stage 6 M19 — ★★★★ root 跑通（ReSukiSU，`verify-root.sh` 8/8）+ chainload 实测成立 + Stage 7 设计成型。**root：主线 v7.2-rc2 非 GKI 上只需两个补丁（`asm/text-patching.h` 改名、主线删了 `strncpy()`），钩子走 tracepoint（源码零插桩），实测内核授予管理器 root、`/data/adb/ksud` 自动就位。⚠️ **只活在 ESP 的实验条目里，重启即回到不带 root 的 `android-b`** —— 还没进 ROM（TODO B11）。chainload：systemd-boot 的 `efi` 指令在本机可用，B3 那个"固件不支持"的顾虑不成立（#73）。Stage 7 M0：救援系统与 LiveCD 合成一件事，构建链已跑通 —— squashfs **55 MiB** + initramfs 648 KiB + 可启动 U 盘镜像 152 MiB（替掉 24.6 GiB 的 Ubuntu），⚠️ **还没在硬件上启动过**。⚠️ 设备上现在装着 ReSukiSU 管理器 APK。（每次开工时更新这一行）
+**当前阶段：Stage 6 M20 — ★★★★ 一次装机把两件大事落地（构建戳 `1787436126`，slot_a）：**① root 随 ROM 常驻**（ReSukiSU，`verify-root.sh` 8/8，postinstall 写进 slot_a 的内核与手工验过的 sha256 逐字节相同）；**② SELinux 四步走完** —— `init` 域里只剩 PID 1，`network_stack` 236→0、`hal_health_default` 235→0（**四条 genfscon，零 allow 规则**），第 4 步规则按真实主体写完并通过 `sepolicy_neverallows`。功能零回归（传感器/声卡/WiFi/root）。⚠️ **仍是 permissive**：转 enforcing 还卡在两个加规则解决不了的东西（hangdump 的 debugfs neverallow 无 userdebug 豁免；smmustall 要 `/dev/mem`，正解是先做 B6）。Stage 7 M0：救援镜像 55 MiB + initramfs 648 KiB，**initramfs 与失败自救路径已上机验过**（120s vs 45s 基线），完整启动（OpenRC→WiFi→ssh）**留给用户在场时做** —— 这机器只有 WiFi，起来但连不上就要人按电源键。（每次开工时更新这一行）
+
+> **★★★★ Stage 6 M20（2026-08-23 夜，用户睡觉期间）：root 进 ROM + SELinux 四步走完。**
+> 完整案卷 [#76](docs/stage4-findings.md) / [#77](docs/stage4-findings.md)。
+> - ★★ **第 3 步（sysfs 打标签）是本轮性价比最高的一击**：
+>   `network_stack` 236→0、`hal_health_default` 235→0，**四条 `genfscon`、
+>   零 allow 规则**。根因是 AOSP 的 genfs 只标了 `/class/...`，而那是符号链接
+>   —— SELinux 标的是真实 inode，也就是 `/sys/devices/platform/...`。
+>   手机 SoC 的那些路径 AOSP 顺手覆盖了，**sc8280xp 的没有**。
+> - ★ **先定义域、再普查**这个顺序被再次证明是对的：大批
+>   `binder → u:r:init:s0` 的 denial（system_server 打给我们的 HAL）
+>   在打完标签后**自己消失**。反过来做会写出"允许 system_server 调用 init"
+>   这种荒唐规则。
+> - ⚠️★ **装机时拆掉一颗地雷**：`update_engine` 标记 slot_a 为 active 之后，
+>   boot_control HAL **立刻把 `default` 改成了 `*-android-a.conf`** ——
+>   新槽起不来就连回落都没有了。重启前必须把 `default` 掰回已知可用的那个槽，
+>   只用 oneshot 过去。
+> - ⚠️★★ **同一个陷阱一天咬了三次**：在挂载点/chroot **外面**用 `[ -e ]`
+>   判**绝对**符号链接。`/sbin/init -> /bin/busybox` 从外面看解析到宿主的
+>   `/bin/busybox`，于是好端端的东西被判成缺失。**判据要么在里面跑，
+>   要么用不跟随链接的方式并单独确认目标。**
+> - ⚠️★ **genfscon 是前缀匹配**：我给 UCSI 的 `power_supply` 打标签时
+>   连带盖住了下面的 `wakeup23`（本该 `sysfs_wakeup`）。
+>   症状是 **denial 的类型变了而不是消失** —— 极容易被误读成进展。
+> - ★ **enforcing 的真正门槛不是规则数量**，是两个结构性的东西：
+>   `hangdump` 读 debugfs 那条 neverallow **没有 userdebug 豁免**；
+>   `smmustall` 要 `/dev/mem`（有豁免，但会让 enforcing 取决于构建变体）。
+>   后者的正解是把 **B6** 做掉，脚本整个消失。
+> - ⚠️ 另记：`screenrecord` 在**灭屏**时报 `UNASSIGNED_LAYER_STACK`，
+>   那跟编解码器毫无关系。TODO A2 据此改写 —— 硬件编码不是"待验证"，
+>   是 2026-08-22 查明后**故意关闭**的（rank 0x80 会压过软编，
+>   导致应用失败而不是回退）。
 
 > **★★★★ Stage 6 M19（2026-08-23）：root 通了；两条"以为是版本问题"的错判。**
 > ★ **ReSukiSU 在主线 v7.2-rc2 上跑通**（据我们所知是 sc8280xp 上第一次在
