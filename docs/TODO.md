@@ -1,6 +1,6 @@
 # 待办清单
 
-最后更新：2026-08-22（v0.3.0-alpha 发布之后）
+最后更新：2026-08-23（v0.4.0-alpha 发布之后）
 
 这份清单的排序原则是**用户能不能感觉到**，而不是有趣程度。每条都尽量写出
 **具体的第一步** —— 没有第一步的条目只是愿望，不是待办。
@@ -12,29 +12,20 @@
 
 ## A. 用户能感觉到的缺口
 
-### A0. ⚠️★ 普通应用能把内核 panic 掉 —— 已定位，补丁待构建
-案卷 [#58](stage4-findings.md)。用户报的「切到设置就卡死」**不是卡死，是内核
-panic**：`kernel BUG at drivers/gpu/drm/drm_crtc.c:161`。
+### A0. ⚠️ 侧滑返回手势失效（用户报告，**假说未证实**）
+用户在装了 v0.4.0-alpha 之前的那一版（桌面模式开着）时报告边缘侧滑返回不工作。
 
-`drm_crtc` 的 `fence_to_crtc()` 在回调里**再查一遍** `fence->ops`，而
-`dma_fence_signal_timestamp_locked()` 会在 signal 时把没有 `.release`/`.wait`
-的 ops（`drm_crtc_fence_ops` 正是）置 NULL —— 两个 name helper 是"先取 ops 再
-回调"，中间那个窗口一旦被 vblank 撞上就 `BUG()`。CRTC out-fence 每 vblank 都
-signal（本机 120 Hz），Android 又在不停查 fence 名字。
-两次实测事件分属两个不同的 app、两条不同的 ioctl 路径 ⇒ **与"设置"无关**。
+**已知**：`navigation_mode = 2`（手势导航）本身是对的；当时 `dumpsys window`
+显示所有应用都在 **freeform 窗口**里（`mWindowingMode=freeform`、`Task name=Desk`），
+而桌面窗口模式下边缘返回的处理方式本来就不同。
 
-★ 已确认**不是"升级内核就好"**：摘 ops 那套的四个提交相对 `v7.2-rc2` 全是
-`behind`（已在我们内核里），而 master 的那个 `BUG_ON` 一字未改。
-
-✅ **已编入内核并装机**（[#62](stage4-findings.md)）：`#33` / 构建戳
-`1787373122` / 槽位 `_b`。6 轮 app 启动 + 800 个 monkey 事件后 pstore 零新增、
-dmesg 零 Oops、`screencap` 正常、GPU 三项判据全 0。
-⚠️ 但**竞态的阴性结果不构成证明**（旧内核也是几分钟才炸一次）——
-真正的依据是那行 `BUG_ON` 已不存在；上机测试回答的是"删掉它有没有引入新问题"。
-
-⬜ **还欠两件**：① 长时间日常使用观察（唯一能提高置信度的办法）；
-② 报到 dri-devel —— 普通应用能 panic 整机、且 mainline master 现存，
-**值得报**。对外动作，等用户定；稿子照 `patches/0013` 的 commit message 改即可。
+⚠️ **这只是嫌疑，没有证实** —— 当时没有运行时开关能把桌面模式关掉再对照
+（那个开发者选项开关只能强制打开，见 A′/#桌面模式）。v0.4.0-alpha 已把桌面
+模式关闭，**所以第一步就是让用户在新版上再试一次**：
+* 好了 ⇒ 就是桌面模式，本条关闭；
+* 还是不行 ⇒ 与桌面模式无关，查 `back_gesture_inset_scale_left/right`
+  （现在是 null）、`dumpsys window | grep -i gesture` 的排除区域，
+  以及触摸驱动在屏幕边缘的上报（#26 那套 evdev 录制方法可复用）。
 
 ### A1. 音频与蓝牙长期运行后死锁 ⚠️ 次高优先
 用户实机报告，我未复现、未定位（[#38](stage4-findings.md)）。
@@ -52,39 +43,18 @@ dmesg 零 Oops、`screencap` 正常、GPU 三项判据全 0。
 手工对照仍可用 `gaokun3-qrtr-lookup` 比服务表：少了哪个服务就指向哪个 DSP。
 ⚠️ 别把 `Handover signaled` 当崩溃证据，那是良性噪声（#37 已用对照实验证明）。
 
-### A2. 硬件视频解码（Venus）— 内核这一半 ✅ 已通，Android 侧待做
-详见 [#41](stage4-findings.md)。实机验证：`/dev/video0` = `qcom-venus-decoder`、
-`/dev/video1` = `qcom-venus-encoder`，`aa00000.video-codec` 绑上 `qcom-venus`，
-`abf0000.clock-controller` 绑上 `sm8350-videocc`，延迟 probe 队列空，
-固件加载失败 0 行。★固件不用找 —— `qcvss8280.mbn` 我们一直在装，
-只是当初被标成"语音服务"（**VSS = Video SubSystem**）。
+### A2. 硬件视频【编码】（Venus）— 解码已通，编码未验证
+解码 ✅ 已随 v0.4.0-alpha 发布（`c2.v4l2.avc.decoder` 实测解出 30 帧，
+案卷 [#41](stage4-findings.md)）。编码这一侧**从没成功过**：`screenrecord`
+仍然失败，没有任何 `c2.v4l2.*.encoder` 被证明产出过一帧。
 
-打了 8 个补丁里的 7 个（0014 是纯格式清理且主线已分叉，跳过）。
-两个非直觉的坑：**必须关 `CONFIG_VIDEO_QCOM_IRIS`**（否则 venus 编不过，
-报错却指向 core.c 像补丁打错），以及整条媒体链上**五个 `=m`** 要拉成 `=y`。
+**第一步**：先读 `scripts/crdroid-tree-fixes.py` 里那两条解码修复 ——
+它们都是"v4l2_codec2 照搬 ChromeOS 行为、而 venus 守规范"这一类，
+编码器多半有它自己的同型问题。然后用 `screenrecord` 复现并抓
+`logcat | grep V4L2Encoder`，看它卡在哪个 ioctl。
 
-**剩下的一半**：Android 需要一个跟 V4L2 说话的 Codec2 组件，现有 66 个解码器
-仍全是软解。★ **`external/v4l2_codec2` 本来就在 crDroid 的 manifest 里**
-（`LineageOS/android_external_v4l2_codec2`），不必新增仓库。
-
-**第一步**（配方来自 `external/v4l2_codec2/README.md`，三个前提已在设备上核实）：
-`PRODUCT_PACKAGES += android.hardware.media.c2-service-v4l2 libv4l2_codec2_vendor_allocator`，
-装 `media_codecs_c2.xml` 到 `/vendor/etc/`，设两条
-`ro.vendor.v4l2_codec2.*_concurrent_instances`，再看
-`service list | grep media.c2` 有没有出现 `IComponentStore/default`
-以及 `dumpsys media.player` 里的 `c2.v4l2.*`。
-
-已核实的三点：
-* ✅ **不会撞名** —— 设备上目前只有 `IComponentStore/**software**`，
-  v4l2 HAL 要的 `IComponentStore/default` 是空的。
-* ✅ `media.c2.hal.selection` 已经是 `aidl`（#36 那一仗的成果）。
-* ⚠️★ **poolmask 不能照抄 README 的 `0xf50000`** —— 那是 ION 的值，
-  而本机**没有 ION**（`/dev/ion` 不存在、`CONFIG_ION` 也不在）。
-  我们有的是 DMABUF heaps（`system` / `linux,cma` / `default_cma_region`），
-  所以要用 BLOB 的 **`0xfc0000`**。抄错这一个数字大概率就是"组件在、一解码就崩"。
-
-⚠️ 别在没法看视频的时候合这个 —— 它替换的是整条媒体解码通路，
-弄坏了比现在的软解更糟。
+⚠️ 别只看"组件注册了"就以为能用 —— `c2.v4l2.avc.encoder` 一直在
+MediaCodecList 里，而解码器也一直在，两者都不能工作。
 
 ### A3. 自动亮度（环境光）— 芯片在总线上不应答，四个软件维度已扫空
 详见 [#72](stage4-findings.md)（并已作废 #43/#68/#70 的历次归因）。
@@ -152,25 +122,18 @@ URL 是 **36.9 MB/s**。对"用户走系统内 OTA 升级"有实际影响（1 GB
 
 ---
 
-## A′. 最近关闭（记在这里，免得下次又被当成待办）
+## A′. 已关闭（只留索引，细节在案卷里）
 
-* **s2idle 待机** ✅ 2026-08-22 修好并随 v0.3.0-alpha 发版。
-  真凶是**我们自己** Stage 2 为 USB adb 加的 `dr_mode="otg"` +
-  `usb-role-switch`：本机 UCSI 坏 → 没有 role 源 → 控制器停在没有 gadget、
-  没有 xhci 的 `device` 态 → 挂起阶段给它断电就**整板复位、零日志**。
-  救援 Ubuntu 用 `system-sleep` 钩子，Android 用息屏切 host / 亮屏切回 device
-  （`bin/gaokun3-usbrole.sh`）。案卷 [#52](stage4-findings.md) →
-  [#57](stage4-findings.md)。
-  ⚠️★ **这条留着是当方法论用的**：它在 Ubuntu 上用同一棵内核复现得一模一样，
-  于是被判成"内核/EC 缺陷、与 Android 无关"——**排除得对，指向的层完全错**
-  （设备树两边是同一份）。另外两道坎叠在一起 + 单次失败率 93%，
-  让每个单变量实验都返回"无效"。剩下的尾巴只有一条：息屏时 USB adb 断（见 A6）。
-* **耳机口 + 内置麦克风** ✅ 已由用户实机确认出声。真凶是 rx-macro 的插值器链
-  从来没接上（内核对此**一行日志都不打**），外加策略没声明耳机设备、
-  框架去看主线上不存在的 `/sys/class/switch/h2w`。
-  ★ 配方来自救援 Ubuntu 上的上游 ALSA UCM2 —— 上游用
-  `Regex "HUAWEI.*MateBook E.*"` 把本机直接 include 成 ThinkPad X13s。
-  **本机凡是 LPASS 音频的事，先去抄那个目录。**[#40](stage4-findings.md)
+* **s2idle 待机** ✅ v0.3.0-alpha。真凶是我们自己加的 `dr_mode="otg"`。
+  [#52](stage4-findings.md)–[#57](stage4-findings.md)
+* **耳机口 + 内置麦克风** ✅ 用户确认出声。[#40](stage4-findings.md)
+* **普通应用能 panic 内核** ✅ v0.4.0-alpha，`patches/0013` 删掉 `drm_crtc`
+  里那行竞态 `BUG_ON`。[#58](stage4-findings.md) / [#62](stage4-findings.md)
+* **硬件视频解码** ✅ v0.4.0-alpha。[#41](stage4-findings.md)
+* **亮度调节** ✅ 真 lights HAL 取代了只接受数值不干活的 stub。
+* **扬声器音量偏小** ✅ WSA 数字音量上限 81→90，实测 +5.7 dB。
+* **插着键盘时屏幕键盘不弹** ✅ `show_ime_with_hard_keyboard` 默认置 1。
+  ⚠️ 键盘开关**不是**这条的解药（Android 看键盘设备存不存在，不看 inhibited）。
 
 ---
 
@@ -221,17 +184,6 @@ mock 报的 skin/battery SHUTDOWN 阈值只有 **36 °C**，而
 **第一步**：在一台可牺牲的机器（或本机，数据已备份）上真跑一次。
 在那之前，"别人能装"这件事是未经验证的。
 
-### B5. 发版流程固化成脚本 ✅ 已做
-[`scripts/release.sh`](../scripts/release.sh)。它存在的理由是里面那几条断言，
-每一条都对应一次真实事故：**一次 `m bacon superimage`**（分两次调用会得到两个
-build stamp，OTA 包与安装用的 super 互不相认）、**清单 `timestamp` 必须等于
-`ro.build.date.utc`**（否则装上后 Updater 永远显示"有更新"）、
-**产物先传、清单最后传**。另外加了一条本轮新学到的：
-**boot.img 里的 kernel sha256 必须与 `prebuilt-boot/vmlinuz.efi` 相同**。
-
-`--stage-only` 把产物传到 `staging/<ver>/` 而不更新 `ota/gaokun3.json` ——
-可以先在自己机器上验一版而不惊动任何用户。**发布是对外动作，应该是显式的一步。**
-
 ### B6. GPU SMMU 中断根治
 实际 DT 是全局 672/673、context bank 从 678 起；而硬件拉的是 675/680，
 其中 680 被分给 CB2、675 整张表里根本没有。很像 CB 起始偏移就错了。
@@ -269,6 +221,17 @@ range in the curve:`（后面是空的，连哪条曲线都没说）。
 **第一步**：5 Hz 很像一个采样节拍 —— 停掉 sensors HAL / `hexagonrpcd`
 看频率变不变。⚠️ **别在没人看着时做**：M12 记过停/重启 HAL 会污染 SSC 会话，
 自动旋转当场失效、要重启 `hexagonrpcd` 并等约 20 秒才恢复。
+
+### B10. `release.sh` 应该自己清理 staging 残留
+⚠️ **这是我造成的流程缺陷，不是意外**：历次调试往 R2 传了 `staging/m14c`、
+`m17`…`m21` 各一个约 1 GB 的 payload，**每次都没清**，加上两份完整的
+`staging/<ver>/`，一共堆了 **9 GiB**（桶总量一度 15.6 GiB，而免费额度是 10 GB）。
+2026-08-22 已手工清空，但下次照样会堆。
+
+**第一步**：在 `release.sh` 上传成功之后删掉同版本的 `staging/<ver>/`；
+`scripts/r2-upload.py` 现在有 `--list` / `--du` / `--delete`，够用了。
+⚠️ 删之前必须确认没人引用 —— 这次是逐个核对了 GitHub 发布页正文里的链接
+和 `docs/` 里的 R2 路径才敢删的。
 
 ---
 
@@ -312,6 +275,16 @@ range in the curve:`（后面是空的，连哪条曲线都没说）。
 —— 对外发言等你。三个问题：`dr_mode=host` 是不是有意为之（那正是我们 #52 的
 取舍另一半）；他们刷完之后 USB adb 还通不通；能不能公开那份内核 `.config`
 （我们这边的断言是 52 条 MUST_Y + `VIDEO_QCOM_IRIS` MUST_N，可以对一遍）。
+
+### D6. 把 `drm_crtc` 那个 `BUG_ON` 报到 dri-devel（对外动作，等你定）
+`patches/0013` 修的是**上游 mainline master 现存**的缺陷：普通应用查一次
+present fence 的名字就能把整机 panic 掉。稿子照那个补丁的 commit message
+改一改就能发。我不代发对外邮件。
+
+### D7. v0.2.0-alpha 的 R2 产物要不要删（2.1 GiB，等你定）
+`install/v0.2.0-alpha/` + `builds/…20260820….zip`。**它们正被 v0.2.0-alpha 的
+GitHub 发布页链接着**，删了那个页面的下载链接会 404。桶现在 6.6 GiB，
+免费额度 10 GB，不删也还撑得住。
 
 ---
 
