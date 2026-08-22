@@ -43,18 +43,38 @@
 手工对照仍可用 `gaokun3-qrtr-lookup` 比服务表：少了哪个服务就指向哪个 DSP。
 ⚠️ 别把 `Handover signaled` 当崩溃证据，那是良性噪声（#37 已用对照实验证明）。
 
-### A2. 硬件视频【编码】（Venus）— 解码已通，编码未验证
+### A2. 硬件视频【编码】（Venus）— ⚠️ **已查明并【故意关闭】，不是待验证项**
 解码 ✅ 已随 v0.4.0-alpha 发布（`c2.v4l2.avc.decoder` 实测解出 30 帧，
-案卷 [#41](stage4-findings.md)）。编码这一侧**从没成功过**：`screenrecord`
-仍然失败，没有任何 `c2.v4l2.*.encoder` 被证明产出过一帧。
+案卷 [#41](stage4-findings.md)）。
 
-**第一步**：先读 `scripts/crdroid-tree-fixes.py` 里那两条解码修复 ——
-它们都是"v4l2_codec2 照搬 ChromeOS 行为、而 venus 守规范"这一类，
-编码器多半有它自己的同型问题。然后用 `screenrecord` 复现并抓
-`logcat | grep V4L2Encoder`，看它卡在哪个 ioctl。
+★ **编码这一侧 2026-08-22 已经实测并定性**，结论写在
+[device.mk](../device/huawei/gaokun3/device.mk) 那段属性旁边（原文可查）：
 
-⚠️ 别只看"组件注册了"就以为能用 —— `c2.v4l2.avc.encoder` 一直在
-MediaCodecList 里，而解码器也一直在，两者都不能工作。
+```
+E EncodeComponent: Unable to parse RGBX_8888 from IMPLEMENTATION_DEFINED
+E EncodeComponent: Failed to get input block layout
+E ...: Attempted to lock() a buffer that was not allocated with a
+       BufferUsage::CPU_* usage.
+```
+
+SurfaceFlinger 交出来的是 **RGBX_8888 / IMPLEMENTATION_DEFINED**，
+而 Venus 编码器要 **NV12**，`v4l2_codec2` 的 `EncodeComponent` **不做这个转换**
+—— 属于组件本身的功能缺失，不是配置能解决的。
+
+⚠️★ **而且开着比关着更糟**：编码组件 rank `0x80` 会压过软编的 `0x200`，
+于是应用**直接失败，而不是回退到软编**。所以两条
+`ro.vendor.v4l2_codec2.encoder.supported.*` 属性是**有意注释掉**的，
+`scripts/verify-venus-codec2.sh:57` 也据此断言"**必须没有**编码组件"。
+录屏/录像走软编，能用。
+
+**真要做的话**，工作量在 `external/v4l2_codec2` 的 `EncodeComponent`：
+让它认 `IMPLEMENTATION_DEFINED`，向 gralloc 问出真实布局并协商 NV12
+（和已经修掉的两条解码 bug 同型：v4l2_codec2 照搬 ChromeOS 行为、venus 守规范）。
+
+⚠️ 记一条方法论：2026-08-23 我又跑了一次 `screenrecord`，失败信息是
+`ERROR: UNASSIGNED_LAYER_STACK` —— **那跟编码器毫无关系**，
+是当时**屏幕是灭的**（`mWakefulness=Asleep`），SurfaceFlinger 拒绝抓屏。
+**灭屏状态下的 screenrecord 结果不能用来判断编解码器。**
 
 ### A3. 自动亮度（环境光）— 芯片在总线上不应答，四个软件维度已扫空
 详见 [#72](stage4-findings.md)（并已作废 #43/#68/#70 的历次归因）。
