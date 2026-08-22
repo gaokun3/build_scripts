@@ -5,7 +5,57 @@
 在华为 MateBook E Go（Snapdragon 8cx Gen 3 / sc8280xp，代号 gaokun）上跑原生 AOSP，
 最终目标是能稳定运行 arm64 手游。
 
-**当前阶段：Stage 6 M18 — ★★★ 光感（自动亮度）定性收敛：驱动在固件里、类型已声明、SEE 确实在 probe，**但芯片在 I²C 上不应答**；`bus_instance` 0–7、`bus_type` 0–3、`rail_on_state` 1/2 全部扫空，#43/#68/#70 的历次归因一并作废。本轮真正的产出是**可信实验循环**（`scripts/ssc/`，60–90 秒一次、带阳性/阴性对照）。同期已装机验收：亮度真 HAL、键盘开关（设置项 + 控制中心磁贴）、WSA 音量上限 90（实测 +5.7 dB）。⚠️ 当前机上构建 m21 带 venus 调试插桩，**不可发布****（每次开工时更新这一行）
+**当前阶段：Stage 6 M19 — ★★★★ root 跑通（ReSukiSU，`verify-root.sh` 8/8）+ chainload 实测成立 + Stage 7 设计成型。**root：主线 v7.2-rc2 非 GKI 上只需两个补丁（`asm/text-patching.h` 改名、主线删了 `strncpy()`），钩子走 tracepoint（源码零插桩），实测内核授予管理器 root、`/data/adb/ksud` 自动就位。⚠️ **只活在 ESP 的实验条目里，重启即回到不带 root 的 `android-b`** —— 还没进 ROM（TODO B11）。chainload：systemd-boot 的 `efi` 指令在本机可用，B3 那个"固件不支持"的顾虑不成立（#73）。Stage 7：救援系统与 LiveCD 合成一件事，救援不再占 24.6 GiB 分区（`docs/stage7-live-installer.md`）。⚠️ 设备上现在装着 ReSukiSU 管理器 APK。（每次开工时更新这一行）
+
+> **★★★★ Stage 6 M19（2026-08-23）：root 通了；两条"以为是版本问题"的错判。**
+> ★ **ReSukiSU 在主线 v7.2-rc2 上跑通**（据我们所知是 sc8280xp 上第一次在
+> 非 GKI 主线内核上跑通 KernelSU 系）。实测证据是活的：
+> `packages.list detected: 128`、`handle_setresuid from 0 to 10291`、
+> `allow root for: 10299`、`/data/adb/ksud` 由管理器自己铺好。
+> 完整案卷 #74，验收 `scripts/verify-root.sh`。
+> - ★★ **两个配置换掉了一堆源码改动**：钩子选 tracepoint 而非手工钩子
+>   —— ReSukiSU 的 `KERNEL_TYPE` **只按版本号判**，7.2 直接被算成 "GKI 2.0"，
+>   于是**内核源码里一个钩子都不用插**（否则 6 个文件 8 处，每次 rebase 重对）；
+>   `CONFIG_KALLSYMS_ALL=y` 又整块跳过 `static_export_check.mk`，
+>   省掉 6 处 selinux 去 `static`。代价只是 `FTRACE_SYSCALLS=y`（本机默认关）。
+> - ⚠️★ **我先选错了上游**（把 "resukisu" 读成 SukiSU-Ultra），但那一轮的失败
+>   有价值：SukiSU-Ultra 的 4 个编译错误**一个都不是版本问题**，全是
+>   "这棵树不是 Android common kernel"。**"新内核编不过"和"非 ACK 编不过"
+>   是两回事**，默认按前者去查会一路查偏。
+> - ⚠️★★ **`set -o pipefail` + `grep -q` = 稳定假阴性**：验收脚本第一版四个
+>   配置项全报 FAIL 而值全对（`grep -q` 提前退出 → 写端 SIGPIPE 141 → pipefail
+>   判整条管道失败）。它**长得和真失败一模一样**，而且打印出来的"实际值"还是对的
+>   —— **判据自相矛盾时，先怀疑判据。**
+> - ⚠️★ **`\(` 会破坏 make 的括号配平**：`$(shell grep -qE "…\(…")` 里那个转义
+>   左括号照样被 make 计数，吞掉收尾的 `)`，报 `invalid syntax in conditional`。
+> - ⚠️★ **别拿开机日志当判据**：本机 dmesg 环形缓冲**十几秒就绕回**，
+>   `Initialized with driver version` 那行早没了。改成活体证据（数 hook 行数、
+>   制造一次 execve 再数）。
+> - ⚠️ 安全性已查：`init.c:268` 那个 `setenforce(true)` 只在 LKM 后加载分支，
+>   内建构建 `ksu_late_loaded` 写死 false，**不会动 permissive**（已作为回归项）。
+> - `su` 给 adb shell 用**还不通**（`allow_shell` 默认 false）。可用
+>   `kernelsu.allow_shell=1` 打开，**但不建议默认开** —— 那等于任何能连 adb
+>   的人无确认拿 root。
+>
+> **★★★ chainload 实测成立（#73），而且我第一轮用错了判据。**
+> systemd-boot 的 `efi` 指令能在本机 LoadImage + StartImage 另一个 EFI 应用，
+> 三轮实验全自动回到 Android，**没人碰过机器** ⇒ TODO B3 的安全阀是**验过的**。
+> - ⚠️★ 我选的判据 `LoaderImageIdentifier` **只在未设置时才写**
+>   （`export-vars.c:36`），嵌套实例永远不会改它 —— 这个判据在物理上就不可能
+>   区分两种结果。★ **选判据先问"两种结果下它会不会不同"**，
+>   一个恒定的观测量不是弱证据，是**零证据**，但读起来和阴性结果一模一样。
+> - 真正的签名是 `boot.c:1381` 的自排除规则；靠它做了一次**预先声明的预测**
+>   （oneshot 指向副本 → 该条目会从 `LoaderEntries` 里消失），实测逐字命中。
+>
+> **★ Stage 7 设计成型**（`docs/stage7-live-installer.md`，用户提的第 3、4 项）：
+> 救援系统与 LiveCD 图形安装器是**同一件事**，一套镜像两个 profile；
+> 救援不再是一个 24.6 GiB 的分区，而是内核 + initramfs + squashfs，
+> 且**与 Android 共用同一个内核**（为此补了 `SQUASHFS=y`——原本是 `=m`，
+> 第 14 个「=m 坑」——以及 `NTFS3_FS=y` / `NLS_UTF8=y`）。
+> ⚠️★ `NTFS3_FS` 的 `depends on !NTFS_FS || m` 会把它**钉死在 =m**，
+> 得先 `--disable NTFS_FS`，否则 `--enable` 写进去也会被 olddefconfig 改回来。
+> ⚠️ ESP 只剩 26 MiB；`Persisted_Capsules.bin`（70 MiB）**决定不动**
+> —— 拿固件更新通路去赌 70 MiB，赔率不对。
 
 > **★★★ Stage 6 M18（2026-08-22）：光感 —— 先造工具，再做实验。**
 > ★★ **纠正一条本仓记错的事实：SLPI 停得掉。** 此前写着"`echo stop` 返回 0
