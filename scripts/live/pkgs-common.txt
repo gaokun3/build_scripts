@@ -17,10 +17,19 @@ openssh
 openssh-server
 avahi
 avahi-tools
+avahi-openrc
 dbus
+dbus-openrc
 haveged
+haveged-openrc
+# ⚠️ 没有 openssh-openrc 这个包（查过 pkgs.alpinelinux.org，404）。
+#    所以 sshd 的 OpenRC 脚本我们【自己带】—— overlay 里的 /etc/init.d/gk3-sshd。
+#    ssh 是这台机器唯一的救命通道，不赌上游的子包划分。
 # —— 分区与文件系统（这一组就是"救援"两个字的全部含义）——
 gptfdisk
+# ⚠️ sgdisk 是【独立子包】—— gptfdisk 只给 gdisk。安装器全靠 sgdisk 分区，
+#    少了它整个安装流程无从谈起。（我核对过这个包名，却忘了加进列表。）
+sgdisk
 parted
 util-linux
 util-linux-misc
@@ -34,9 +43,12 @@ lsblk
 blkid
 sfdisk
 # —— 装 Android 要用的 ——
-# ★ simg2img 在 android-tools 里：super.img 是 Android sparse 格式，
-#   直接 dd 会得到一个"校验和对得上但没有 LP 元数据"的分区（本仓踩过）。
-android-tools
+# ★ simg2img：super.img 是 Android sparse 格式，直接 dd 会得到一个
+#   "校验和对得上但没有 LP 元数据"的分区（本仓踩过，见 stage2-findings 第 1 节）。
+# ⚠️ 要的是【子包】android-tools-simg2img，不是 android-tools ——
+#   后者会拖进 protobuf + abseil-cpp 整套（226 个包里一大半是它带的），
+#   而这个镜像的体积目标是 ≤120 MiB。
+android-tools-simg2img
 zstd
 xz
 rsync

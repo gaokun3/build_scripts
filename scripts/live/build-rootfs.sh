@@ -142,7 +142,7 @@ mkdir -p "$ROOTFS/etc/runlevels/default" "$ROOTFS/etc/runlevels/boot"
 for svc in hostname bootmisc syslog; do
     [ -f "$ROOTFS/etc/init.d/$svc" ] && ln -sf "/etc/init.d/$svc" "$ROOTFS/etc/runlevels/boot/$svc"
 done
-for svc in networking gk3-wifi sshd dbus avahi-daemon haveged; do
+for svc in gk3-wifi gk3-sshd dbus avahi-daemon haveged; do
     [ -f "$ROOTFS/etc/init.d/$svc" ] && ln -sf "/etc/init.d/$svc" "$ROOTFS/etc/runlevels/default/$svc"
 done
 ok "OpenRC 服务已挂到 runlevel"
@@ -161,6 +161,21 @@ if [ -n "$SSH_KEY" ]; then
 else
     # ⚠️ 公开发布的 live 镜像【不能】带任何人的公钥。
     [ "$PROFILE" = rescue ] && echo "   ⚠️ 没给 --ssh-key —— 这个救援镜像将【无法 ssh 登录】"
+fi
+
+# ---- 5a. ssh 主机密钥 -----------------------------------------------------
+# rescue 是【给一个人用的私有镜像】，构建时生成主机密钥 → 每次开机指纹不变，
+# 自动化不会撞 host key 变更。
+# ⚠️ live 是【公开发布】的，绝对不能预置主机密钥 —— 所有人共用一把私钥
+#    等于没有加密。那种情况下 /etc/init.d/gk3-sshd 会在首次启动时现生成。
+if [ "$PROFILE" = rescue ]; then
+    chroot "$ROOTFS" /usr/bin/ssh-keygen -A
+    n=$(ls "$ROOTFS"/etc/ssh/ssh_host_*_key 2>/dev/null | wc -l)
+    [ "$n" -gt 0 ] || die "主机密钥没生成出来"
+    ok "预置了 $n 把 ssh 主机密钥（指纹跨重启不变）"
+else
+    rm -f "$ROOTFS"/etc/ssh/ssh_host_*
+    ok "live 镜像不带主机密钥（首次启动时现生成）"
 fi
 
 # ---- 5b. WiFi 凭据（可选）------------------------------------------------
@@ -189,32 +204,63 @@ fi
 
 # ---- 7. 断言（在做成 squashfs 之前，别把坏镜像做出来）--------------------
 say "4. 体检"
+# ⚠️★ 必须在 chroot 【里面】查。第一版在外面 `[ -e $ROOTFS/sbin/init ]`，
+#    而那是个指向 /bin/busybox 的【绝对符号链接】—— 从宿主看它解析到宿主的
+#    /bin/busybox，于是好端端的东西被判成"缺失"。当时 6 个失败里有 5 个是
+#    这一个原因（init、两个 runlevel 链接、以及两个路径猜错的）。
+# ⚠️★ 而且查【命令】而不是【路径】：sgdisk 在 /usr/bin、mkfs.vfat 在 /sbin，
+#    路径这种东西不该由我们来记。
 BAD=0
-need_file() { [ -e "$ROOTFS$1" ] && ok "$1" || { echo "   ✗ 缺 $1"; BAD=1; }; }
-need_file /sbin/init
-need_file /usr/sbin/sshd
-need_file /sbin/sgdisk
-need_file /usr/sbin/resize2fs
-need_file /sbin/mkfs.ext4
-need_file /usr/sbin/mkfs.vfat
-need_file /usr/sbin/ntfsresize
-need_file /usr/bin/simg2img          # ★ super.img 是 sparse，没它装不了 Android
-need_file /etc/runlevels/default/sshd
-need_file /bin/busybox.static        # initramfs 要用它
-need_file /sbin/wpa_supplicant
-need_file /sbin/dhcpcd
-need_file /etc/init.d/gk3-wifi
-need_file /etc/runlevels/default/gk3-wifi
+in_ch() { chroot "$ROOTFS" /bin/sh -c "$1" >/dev/null 2>&1; }
+need_cmd()  { if in_ch "command -v $1"; then ok "命令 $1"; else echo "   ✗ 缺命令 $1"; BAD=1; fi; }
+need_path() { if in_ch "[ -e '$1' ]"; then ok "$1"; else echo "   ✗ 缺 $1"; BAD=1; fi; }
+# ⚠️ 多个候选路径要【逐个】试。第一版把它们塞进同一个 `ls a b`，
+#    而 ls 只要有一个参数不匹配就返回非零 —— 于是固件明明在
+#    /lib/firmware 下，却因为 /usr/lib/firmware 不存在而被判成缺失。
+need_glob() {
+    for pat in "$@"; do
+        if in_ch "ls $pat"; then ok "$pat"; return; fi
+    done
+    echo "   ✗ 这些都没有匹配：$*"; BAD=1
+}
+
+echo "   ── 诊断：/etc/init.d 里有 ──"
+chroot "$ROOTFS" /bin/sh -c 'ls /etc/init.d' 2>/dev/null | tr '
+' ' ' | fold -w 100 -s | sed 's/^/     /'
+echo
+echo "   ── 诊断：默认 runlevel ──"
+chroot "$ROOTFS" /bin/sh -c 'ls /etc/runlevels/default' 2>/dev/null | tr '
+' ' ' | sed 's/^/     /'
+echo
+
+need_path /sbin/init
+need_cmd  sshd
+need_cmd  sgdisk
+need_cmd  parted
+need_cmd  resize2fs
+need_cmd  mkfs.ext4
+need_cmd  mkfs.vfat
+need_cmd  mkfs.f2fs
+need_cmd  ntfsresize
+need_cmd  simg2img          # ★ super.img 是 sparse，没它装不了 Android
+need_cmd  wpa_supplicant
+need_cmd  dhcpcd
+need_cmd  iw
+need_path /bin/busybox.static
+need_path /etc/init.d/gk3-wifi
+need_path /etc/runlevels/default/gk3-wifi
+need_path /etc/runlevels/default/gk3-sshd
 # ★ ath11k 固件：没有它 wlan0 根本不出现，而"没网"在这台机器上等于"救援失效"。
-#   路径按设备实测（/vendor/firmware/ath11k/WCN6855/hw2.x/）对齐。
-for hw in hw2.0 hw2.1; do
-    need_file "/lib/firmware/ath11k/WCN6855/$hw/amss.bin"
-    need_file "/lib/firmware/ath11k/WCN6855/$hw/board-2.bin"
-done
+#   ⚠️ 不写死目录 —— linux-firmware 在 /lib 还是 /usr/lib、压不压缩，各版本不同。
+# ★ Alpine 的固件是 .zst 压缩的 —— 通配符必须带 *。
+#   已核实本机内核 CONFIG_FW_LOADER_COMPRESS_ZSTD=y，直接认压缩固件。
+need_glob '/lib/firmware/ath11k/WCN6855/*/amss.bin*'    '/usr/lib/firmware/ath11k/WCN6855/*/amss.bin*'
+need_glob '/lib/firmware/ath11k/WCN6855/*/board-2.bin*' '/usr/lib/firmware/ath11k/WCN6855/*/board-2.bin*'
+need_glob '/lib/firmware/ath11k/WCN6855/*/m3.bin*'      '/usr/lib/firmware/ath11k/WCN6855/*/m3.bin*'
 if [ "$PROFILE" = live ]; then
-    need_file /usr/lib/libcairo.so.2
-    need_file /usr/lib/libinput.so.10
-    need_file /usr/share/fonts/wenquanyi
+    need_glob '/usr/lib/libcairo.so.*'
+    need_glob '/usr/lib/libinput.so.*'
+    need_glob '/usr/share/fonts/*/wqy*' '/usr/share/fonts/wqy*/*'
 fi
 [ $BAD -eq 0 ] || die "体检没过 —— 不出镜像。上面缺的东西要么包名错了，要么 apk 装失败被吞了。"
 
@@ -235,5 +281,12 @@ mksquashfs "$ROOTFS" "$SQUASH" -comp zstd -Xcompression-level 19 -noappend -no-p
 ok "$SQUASH  $(du -h "$SQUASH" | cut -f1)"
 
 [ -n "$KEEP" ] || rm -rf "$ROOTFS"
+
+# 这个脚本是 sudo 跑的，产物会归 root —— 而下一步 build-initramfs.sh
+# 【不需要 root】。不还回去的话下一步只会得到一句 "Permission denied"。
+if [ -n "${SUDO_USER:-}" ]; then
+    chown -R "$SUDO_USER" "$OUT" 2>/dev/null || true
+    ok "产物归还给 $SUDO_USER"
+fi
 echo
-echo "下一步：bash scripts/live/build-initramfs.sh --rootfs-src $OUT --out $OUT"
+echo "下一步：bash scripts/live/build-initramfs.sh --busybox $OUT/busybox.static --out $OUT"

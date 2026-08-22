@@ -21,6 +21,9 @@ depend() {
 }
 
 start() {
+    # lo 自己拉起来：不依赖 ifupdown-ng 的 networking 服务在哪个子包里
+    ip link set lo up 2>/dev/null
+
     if [ ! -e "/sys/class/net/$IFACE" ]; then
         eerror "没有 $IFACE —— ath11k 没起来？看 dmesg | grep ath11k"
         return 1

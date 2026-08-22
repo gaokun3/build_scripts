@@ -34,9 +34,18 @@ if command -v file >/dev/null; then
         *"ARM aarch64"*) ;;
         *) die "$BB 不是 aarch64：$finfo" ;;
     esac
+    # ⚠️★ 判"是不是静态"不要只认 "statically linked"。Alpine 的 busybox-static
+    #    是 **static-pie**，file 报的是 "static-pie linked" —— 第一版就因此把一个
+    #    完全正确的二进制判成了失败。把【失败条件】写清楚，比枚举成功条件可靠。
     case "$finfo" in
-        *statically*) ok "静态 aarch64 busybox" ;;
-        *) die "$BB 不是静态链接的：$finfo" ;;
+        *"dynamically linked"*|*interpreter*)
+            die "$BB 是动态链接的：$finfo
+    initramfs 里没有 ld-musl，动态 busybox 会以 'No such file or directory' 失败，
+    而那个报错完全指不到根因。" ;;
+        *statically*|*"static-pie"*)
+            ok "静态 aarch64 busybox（$(echo "$finfo" | grep -o 'stat[a-z-]*[a-z]* linked')）" ;;
+        *)
+            die "认不出链接方式，不敢用：$finfo" ;;
     esac
 fi
 

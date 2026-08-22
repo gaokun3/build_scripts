@@ -78,9 +78,70 @@ ath11k 固件 / OpenRC 的 runlevel 链接）。
 理由是本仓反复吃过的亏：**包名写错时 `apk add` 的失败很容易被吞掉**，
 而错误要等到镜像装到机器上、开机连不上网才暴露。
 
-## 现状
+## 现状（2026-08-23）
 
-* ✅ 脚本写完，包名逐个核对过（`pkgs.alpinelinux.org` 全部 200）
-* ⬜ 还没在构建机上真跑过
+三步链路在构建机上**端到端跑通**：
+
+| 产物 | 大小 |
+|---|---|
+| `gaokun3-rescue.squashfs` | **55 MiB** |
+| `initramfs.img` | **648 KiB** |
+| `gaokun3-live.img`（可启动 U 盘镜像） | **152 MiB** |
+
+对比它要替掉的东西：**24.6 GiB 的 Ubuntu 救援分区**。
+
+* ✅ 构建脚本跑通，打包前的断言全过
+* ⬜ **还没在硬件上启动过** —— 设备当时在用户手上
 * ⬜ 图形安装器（`live` profile）还没写
 * ⬜ `install-gaokun3.sh` 还是"清空整盘"一条路，未拆成可调用的库
+
+## 这一轮踩到的坑（都值得记）
+
+### ★★ 在 chroot 外面检查符号链接 —— 一个原因造出 5 个假失败
+
+第一版体检写的是 `[ -e "$ROOTFS/sbin/init" ]`。而 Alpine 的 `/sbin/init` 是一个
+**指向 `/bin/busybox` 的绝对符号链接**，从宿主看它解析到**宿主的** `/bin/busybox`
+—— Ubuntu 上没这个文件，于是好端端的东西被判成"缺失"。
+`/etc/runlevels/default/*` 同理（指向 `/etc/init.d/*`）。
+6 个失败里 5 个是这一个原因。
+
+**修法**：所有检查都在 chroot 里跑，而且查**命令**（`command -v`）而不是**路径** ——
+`sgdisk` 在 `/usr/bin`、`mkfs.vfat` 在 `/sbin`，这种事不该由我们来记。
+
+### ★ `ls a b`：只要有一个 glob 不匹配就整体非零
+
+固件检查写成 `ls /lib/firmware/... /usr/lib/firmware/...`，而本机只有前者，
+于是**固件明明在**却被判缺失。候选路径要**逐个**试，不能塞进同一个 `ls`。
+
+### ★ `static-pie linked` ≠ `statically linked`
+
+initramfs 构建器断言 busybox 必须静态，模式写的是 `*statically*`。
+Alpine 的 `busybox-static` 是 **static-pie**，`file` 报 `static-pie linked`，
+于是一个完全正确的二进制被拒了。
+**教训：把【失败条件】写清楚（"是不是动态链接"），比枚举成功条件可靠。**
+
+### ★ `sgdisk` 是独立子包
+
+`gptfdisk` 只给 `gdisk`。我核对过 `sgdisk` 这个包名存在，**却忘了加进列表** ——
+而安装器全靠它分区。这正是"打包前逐项断言"的价值：不然要等镜像装到机器上、
+分区那一步才炸。
+
+### ★ `android-tools` 会拖进 protobuf + abseil-cpp
+
+我们只要 `simg2img` 一个命令，用**子包 `android-tools-simg2img`**。
+整包会把 226 个依赖里的一大半带进来，而这个镜像的体积目标是 ≤120 MiB。
+
+### ⚠️ 又一次：管道吞掉退出码
+
+`cmd | sed ...; echo $?` 拿到的是 `sed` 的退出码 —— 一次 9 个 `mkdir` 全失败
+却报 `RC=0`。本仓在 `make ... | tail` 上记过同一个坑，这次是在临时的运行器里
+复发的。**取退出码就别接管道。**
+
+### ⚠️ 运维：构建机 ssh 反复掉线时走 `az vm run-command`
+
+本轮 ssh/scp 连续失败十几分钟（Azure 报 running，实测 125 GiB 内存、
+load 0.05、sshd active，机器本身完全空闲）。
+`az vm run-command invoke --scripts @文件` 走的是 VM agent，**不依赖 ssh**，
+可以送文件（base64）也可以同步跑构建并拿回输出。
+⚠️ 它的输出在 Windows 上会被 gbk 转码吃掉非 ASCII 字符，日志里带中文的话
+要 `sed 's/[^[:print:]]//g'` 或者只 grep ASCII。
