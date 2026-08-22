@@ -244,6 +244,22 @@ range in the curve:`（后面是空的，连哪条曲线都没说）。
 看频率变不变。⚠️ **别在没人看着时做**：M12 记过停/重启 HAL 会污染 SSC 会话，
 自动旋转当场失效、要重启 `hexagonrpcd` 并等约 20 秒才恢复。
 
+### B11. 把 root（ReSukiSU）装进 ROM
+内核这一半已经跑通并实测（[#74](stage4-findings.md)，`scripts/verify-root.sh` 8/8）：
+`CONFIG_KSU=y` + tracepoint 钩子 + 两个补丁，管理器拿到 root、`/data/adb/ksud` 自动就位。
+
+**但现在只活在 ESP 的一个实验条目里**（`ksu-full.conf`，oneshot），
+下次重启就回到不带 root 的 `android-b`。要常驻需要：
+* 用带 KSU 的内核重建 boot.img + OTA（构建流程不用改，`kernel-setup-resukisu.sh`
+  已经能把驱动接进内核树）
+* 决定要不要预装管理器 APK。★ **ROM 侧其实什么都不用加** ——
+  `ksud` 就在 APK 的 `lib/arm64-v8a/libksud.so` 里，装 App 即到位。
+* ⚠️ 决定要不要在 cmdline 里给 `kernelsu.allow_shell=1`。**我的建议是不给**：
+  那等于任何能连 adb 的人直接拿 root，没有任何确认。
+
+⚠️ 顺带记一条产品层面的取舍：**root 会影响 Play Integrity 和部分带反作弊的游戏**，
+而本项目的目标之一正是跑手游。这是用户的选择，不是技术障碍，但值得写在发版说明里。
+
 ### B10. `release.sh` 应该自己清理 staging 残留
 ⚠️ **这是我造成的流程缺陷，不是意外**：历次调试往 R2 传了 `staging/m14c`、
 `m17`…`m21` 各一个约 1 GB 的 payload，**每次都没清**，加上两份完整的

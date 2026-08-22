@@ -5,7 +5,10 @@
 #
 # ⚠️ 需要 adb root（本机要先 `adb shell setprop service.adb.root 1` 再 `adb root`，
 #    而且每次重启都要重做）。
-set -uo pipefail
+# ⚠️★ 故意【不开 pipefail】。`cmd | grep -q` 里 grep 命中就提前退出，
+#    写端吃到 SIGPIPE 返回 141，pipefail 会把整条管道判成失败 ——
+#    结果是"值明明对，判据却报 FAIL"。本脚本第一版四个配置项全是这么假阴性的。
+set -u
 PASS=0; FAIL=0
 ok()   { echo "  [OK]   $*"; PASS=$((PASS+1)); }
 bad()  { echo "  [FAIL] $*"; FAIL=$((FAIL+1)); }
@@ -19,38 +22,49 @@ info "$UNAME"
 [ -n "$UNAME" ] || { echo "adb 不通，停"; exit 2; }
 
 echo "═══ 1. 内核配置（从 /proc/config.gz 读实值，不看构建机上的 .config）═══"
-CFG=$(adb exec-out 'zcat /proc/config.gz' 2>/dev/null)
-if [ -z "$CFG" ]; then
+CFGF=$(mktemp)
+# exec-out 而不是 shell：shell 会做行尾转换，压缩流会被弄坏
+adb exec-out 'zcat /proc/config.gz' > "$CFGF" 2>/dev/null
+if [ ! -s "$CFGF" ]; then
     bad "读不到 /proc/config.gz（要 root；CONFIG_IKCONFIG_PROC 也得开）"
 else
     for k in CONFIG_KSU=y CONFIG_KSU_TRACEPOINT_HOOK=y CONFIG_FTRACE_SYSCALLS=y CONFIG_KALLSYMS_ALL=y; do
-        if printf '%s' "$CFG" | grep -qx "$k"; then ok "$k"; else
-            bad "$k —— 实际：$(printf '%s' "$CFG" | grep "^${k%%=*}=" || echo '未设置')"
+        if grep -qxF "$k" "$CFGF"; then ok "$k"; else
+            bad "$k —— 实际：$(grep "^${k%%=*}=" "$CFGF" || echo '未设置')"
         fi
     done
 fi
+rm -f "$CFGF"
 
-echo "═══ 2. 驱动初始化（dmesg）═══"
-# 字符串出处：kernel/include/klog.h 把 pr_fmt 设成 "KernelSU: "；
-#            kernel/core/init.c:177 是内建模式那一行。
-INIT=$(A 'dmesg' | grep -m1 'KernelSU: Initialized with driver version')
-if [ -n "$INIT" ]; then
-    ok "驱动已初始化"
-    info "$(printf '%s' "$INIT" | sed 's/.*KernelSU: //')"
-    printf '%s' "$INIT" | grep -q 'Work mode: Built-in' \
-        && ok "Work mode = Built-in（不是 LKM 后加载）" \
-        || bad "Work mode 不是 Built-in —— 后加载模式会尝试把 SELinux 切成 enforcing"
+echo "═══ 2. 驱动在跑（活体证据，不看开机日志）═══"
+# ⚠️ 别拿开机那行 "KernelSU: Initialized with driver version" 当判据 ——
+#    本机 dmesg 环形缓冲开机十几秒就绕回了，那行早没了，判据会稳定假阴性。
+#    改成看【现在还在产生】的钩子活动：hook_manager 每拦一次 execve 就打一行。
+BEFORE=$(adb shell 'dmesg | grep -c "KernelSU: hook_manager:"' | tr -d '')
+# 制造一次 execve：用一个平时不会被执行的路径，好在日志里认得出来
+adb shell '/system/bin/toybox true' >/dev/null 2>&1
+sleep 1
+AFTER=$(adb shell 'dmesg | grep -c "KernelSU: hook_manager:"' | tr -d '')
+if [ "${AFTER:-0}" -gt "${BEFORE:-0}" ]; then
+    ok "tracepoint 钩子活着：制造一次 execve 后 hook_manager 日志 $BEFORE → $AFTER"
+elif [ "${AFTER:-0}" -gt 0 ]; then
+    ok "有 hook_manager 日志（$AFTER 行），但本次 execve 没新增"
+    info "可能是同一进程名被去重，或 dmesg 又绕回了；不判失败"
 else
-    bad "dmesg 里没有 KernelSU 初始化行"
+    bad "一条 hook_manager 日志都没有 —— 钩子没挂上，root 不会工作"
 fi
+adb shell 'dmesg | grep "KernelSU:" | tail -3' | sed 's/^/         /'
 
-echo "═══ 3. tracepoint 钩子真的注册上了 ═══"
-# 出处：kernel/hook/syscall_hook_manager.c:149
-if A 'dmesg' | grep -q 'sys_enter tracepoint registered'; then
-    ok "sys_enter tracepoint 已注册"
+echo "═══ 3. 驱动版本（如果开机日志还在的话）═══"
+INIT=$(adb shell 'dmesg | grep "Initialized with driver version"' | tr -d '')
+if [ -n "$INIT" ]; then
+    ok "$(printf '%s' "$INIT" | sed 's/.*KernelSU: //')"
+    case "$INIT" in
+        *"Work mode: Built-in"*) ok "Work mode = Built-in" ;;
+        *) bad "Work mode 不是 Built-in —— 后加载模式会尝试把 SELinux 切成 enforcing" ;;
+    esac
 else
-    bad "没看到 'sys_enter tracepoint registered' —— 钩子没挂上，root 不会工作"
-    A 'dmesg' | grep -i 'hook_manager' | head -5 | sed 's/^/         /'
+    info "[跳过] dmesg 已绕回，开机那行没了（不判失败，第 2 节才是判据）"
 fi
 
 echo "═══ 4. 回归：SELinux 还是 permissive ═══"

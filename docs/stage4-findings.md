@@ -3962,3 +3962,87 @@ if (strcaseeq16(entry->loader, loaded_image_path)) {
 ⚠️ 但注意 **ESP 只剩 28 MB（296M 用了 268M，91%）**，
 里面还躺着 70 MB 的 `Persisted_Capsules.bin` 和 31 MB 的
 `EFI/`（含已抹除的 Windows 那一整棵）。要加东西先腾地方。
+
+---
+
+## #74 ★★★★ root（ReSukiSU）在主线 v7.2-rc2 上跑通（2026-08-23）
+
+**判据达成**（`scripts/verify-root.sh` 8/8）：内核 `#38` 起来后
+
+```
+KernelSU: packages.list detected: 128       ← throne tracker 读到了 Android 的包列表
+KernelSU: handle_setresuid from 0 to 10291  ← setresuid 钩子在真实应用启动时触发
+KernelSU: allow root for: 10299             ← 内核授予管理器 root
+/data/adb/ksud  5014624 bytes               ← 管理器自己把守护进程铺好了
+```
+
+据我们所知这是 sc8280xp 上第一次在**非 GKI 的主线内核**上跑通 KernelSU 系方案。
+
+### 只需要两个补丁，而且都不在预料的地方
+
+⚠️★ **我预期的是"版本漂移"，结果两个真问题里只有一个是。**
+
+| 补丁 | 真实原因 | 归类 |
+|---|---|---|
+| `patches/resukisu/0001` | arm64 的 `asm/patching.h` 在 **6.13** 被并进 `asm/text-patching.h`；上游的 `LINUX_VERSION_CODE >= 5.14` 守卫**只有下界** | ✅ 确实是版本漂移 |
+| `patches/resukisu/0002` | 主线**把 `strncpy()` 整个删了**（Kees Cook 的弃用运动）。7.2 的 `include/linux/string.h` 里它只剩注释，`fs/` 与 `kernel/` 全树零调用 | 不是"新"，是"这个函数没了" |
+
+★ 而**选错上游那一轮**（我把 "resukisu" 读成了 SukiSU-Ultra）反倒留下一组
+干净的对照数据：SukiSU-Ultra 在同一棵树上首次编译报 **4 个错误**，全部来自
+`selinux/sepolicy.c` 直接引用 Android common kernel 私有的
+`policydb.android_netlink_route` —— **一个都不是版本问题，全是"这棵树不是 ACK"**。
+ReSukiSU 同一处代码用 `KSU_COMPAT_HAS_*` 宏包着，因为它有
+`tools/kernel_compat.mk`：**grep 内核源码**逐个探测 API 在不在（本次打印了 36 条
+compat 探测结果）。
+★ **教训：面对"新内核编不过"，先分清是"版本变了"还是"根本不是那种内核"。**
+
+### 两个配置换掉了一堆源码改动
+
+* **钩子方式选 tracepoint，不是手工钩子。** ReSukiSU 的 `KERNEL_TYPE`
+  （`Kbuild:104-114`）**只按版本号判**：`VERSION>=6` 就算 "GKI 2.0"。
+  7.2 因此直接过了那道 "TP hooks are incompatible with Non-GKI" 的门，
+  **内核源码里一个钩子都不用插**（否则要在 `kernel/sys.c`、`fs/read_write.c`、
+  `fs/exec.c`、`fs/open.c`、`fs/stat.c`、`kernel/reboot.c` 插 8 处，
+  且每次 rebase 都要重新对齐）。代价只有 `CONFIG_FTRACE_SYSCALLS=y`
+  —— `sys_enter` tracepoint 由它提供，而本机**默认是关的**
+  （`HAVE_SYSCALL_TRACEPOINTS=y` 只说明架构支持）。
+* **`CONFIG_KALLSYMS_ALL=y` 换掉 6 处 selinux 去 `static`。**
+  `Kbuild:137-141`：只要它是 y，整个 `tools/static_export_check.mk` 就不被 include。
+  否则上游会 `$(error)` 逼你去改 `security/selinux/` 的源码。
+
+### ⚠️ 顺手拆掉的三个坑
+
+1. ★ **`\(` 会破坏 make 的括号配平。** 我给 strncpy 写探测时用了
+   `ifeq ($(shell grep -qE "strncpy\(char \*" …),0)`，make 扫描 `$(shell …)`
+   时把 `\(` 也算作左括号，吞掉了收尾的 `)`，报的是
+   `invalid syntax in conditional` —— 完全看不出跟正则有关。
+   **`$(shell)` 里的模式不要出现不配对的括号。**
+2. ★★ **`set -o pipefail` + `grep -q` = 稳定假阴性。**
+   `verify-root.sh` 第一版四个配置项全报 FAIL 而实际全对：`grep -q` 命中就提前
+   退出，写端 `printf` 吃到 SIGPIPE 返回 141，pipefail 把整条管道判成失败。
+   ⚠️ 这个假阴性**长得和真失败一模一样**，而且它打印的"实际值"还是对的
+   —— 判据自相矛盾的时候，先怀疑判据。
+3. ★ **别拿开机日志当判据。** 本机 dmesg 环形缓冲**十几秒就绕回**
+   （最早一行 t=14s），`Initialized with driver version` 那行早没了。
+   改成活体证据：数 `hook_manager` 的行数、制造一次 execve 再数一次。
+
+### ⚠️ 安全性：确认它不会动 SELinux
+
+`core/init.c:268` 有 `if (!getenforce()) { setenforce(true); }` —— 本机是
+**故意跑 permissive**（没写 sepolicy），被切成 enforcing 会大面积失效。
+查过了：那段在 `if (ksu_late_loaded)` 分支里，而 `ksu_late_loaded` 在
+非 `MODULE` 构建下写死 `false`（`init.c:184-185`）。我们是 `=y` 内建，走不到。
+实测 `getenforce` 仍是 `Permissive`，并已作为回归项写进验收脚本。
+
+### 还没做的
+
+* **`su` 给 adb shell 用还不通**：`allowlist.c:284` 只在 `allow_shell` 为真时
+  放行 uid 2000，而 `allow_shell` 默认 false（`init.c:150-152`，只有
+  `CONFIG_KSU_DEBUG` 才默认开）。可用 cmdline `kernelsu.allow_shell=1` 打开。
+  ⚠️ **不建议默认开** —— 那等于任何能连 adb 的人直接拿 root，没有任何确认。
+  正常路径是在管理器里逐个授权。
+* **还没进 ROM**：现在跑的是 ESP 上的实验条目 `ksu-full.conf`（oneshot），
+  下次重启就回到不带 root 的 `android-b`。要常驻得重新构建 boot.img + OTA。
+* **管理器 APK 要不要随 ROM 发**：`ksud` 就在 APK 的
+  `lib/arm64-v8a/libksud.so` 里（5,014,624 字节），装 App 即到位，
+  所以 ROM 侧其实**什么都不用加**。是否预装是产品决定，未做。
