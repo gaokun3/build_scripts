@@ -1,0 +1,19 @@
+# hexagonrpcd —— 给 SLPI 上的 DSP 当只读文件服务器（传感器整条链的地基）。
+#
+# ⚠️ 全 AOSP 树里【没有任何现成的 sepolicy】（grep 过 system/sepolicy 与所有
+#    device/*/*/sepolicy，零命中）。它是 external/hexagonrpc 的上游二进制，
+#    而那个上游从来没在带 SELinux 的 Android 上被 enforcing 跑过。
+#
+# 此前它没有 file_contexts 条目，于是留在 init 域里 —— #60 普查里
+# `u:r:init:s0` 那 88 条中的 22 条就是它。
+#
+# 安装路径从构建产物核实：out/target/product/gaokun3/vendor/bin/hexagonrpcd
+type hexagonrpcd, domain;
+type hexagonrpcd_exec, exec_type, vendor_file_type, file_type;
+init_daemon_domain(hexagonrpcd)
+
+# ⬜ 它真正需要的权限要等第 4 步（重新普查）才写。已知会用到的至少有：
+#    * /dev/fastrpc-sdsp  —— ⚠️ 那个节点【也没有 file_contexts 条目】，
+#      现在是通用兜底的 device 类型，和 /dev/dri 是同一类缺口
+#    * /vendor/etc/hexagonrpcd-root/ 下的只读文件（vendor_file，应当现成）
+#    * QRTR socket（AF_QIPCRTR）—— 传感器 HAL 那边也要

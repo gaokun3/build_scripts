@@ -4046,3 +4046,100 @@ compat 探测结果）。
 * **管理器 APK 要不要随 ROM 发**：`ksud` 就在 APK 的
   `lib/arm64-v8a/libksud.so` 里（5,014,624 字节），装 App 即到位，
   所以 ROM 侧其实**什么都不用加**。是否预装是产品决定，未做。
+
+---
+
+## #75 ★★★ SELinux 第 1 步做完：定义域 + 打标签，顺带挖出两个结构性阻塞（2026-08-23）
+
+[#60](#60) 定下的顺序是：①定义域 → ②给设备节点定类型 → ③补 sysfs 标签 →
+④**重新普查** → 才写 allow。本轮做完 ①，`m selinux_policy` 通过、
+`sepolicy_neverallows` 检查通过（`SEPOLICY_RC=0`）。
+
+⚠️ **本轮刻意一条 allow 规则都没从 denial 日志里抄。** 理由 #60 已经证明：
+定义域之前，那些 denial 的 `scontext` 全是 `u:r:init:s0`，
+照着它们写出来的规则挂在错误的主体上。
+
+### ✅ 三个 HAL：复用 AOSP 标准域，零 allow 规则
+
+这和 `/dev/dri → gpu_device` 是同一类胜利 —— **标签对了，核心策略里现成的
+规则就生效**。我们的三个 HAL 二进制只是换了个名字：
+
+| 我们的二进制 | 复用的 exec 类型 |
+|---|---|
+| `android.hardware.sensors-service.gaokun3` | `hal_sensors_default_exec` |
+| `android.hardware.light-service.gaokun3` | `hal_light_default_exec` |
+| `android.hardware.boot-service.gaokun3` | `hal_bootctl_default_exec` |
+
+三个类型名都在 `system/sepolicy/vendor/file_contexts` 里逐行核对过
+（AOSP 自己的 `*.example` 就是这么写的）。此前它们没有任何 file_contexts
+条目，于是留在 init 域 —— #60 里 `comm="android.hardwar"` 那 46 条就是它们。
+
+### ✅ 拆掉 4 处 `seclabel` 权宜之计
+
+`audioroute` / `hangdump` / `smmustall` 此前在 `.rc` 里硬写
+`seclabel u:r:shell:s0` —— **让一个 root 守护进程跑在为 adb 设计的 shell 域里，
+方向是反的**，permissive 下看着能用，enforcing 下过不了。
+现在改由 file_contexts 打标签、init 自动做域转换。
+
+★ `bpf-relabel.sh` **故意保留** `seclabel u:r:vendor_init:s0`：它唯一的作用是在
+没打 `patches/0007` 的内核上给 bpffs 子目录 `chcon`，而 relabel bpffs 是受
+neverallow 限制的动作，只有 `vendor_init` 拿得到。给它独立域反而会让那条
+保命通路失效。
+
+### ⚠️★★ 两个结构性阻塞 —— 在写规则【之前】就发现，这正是先定义域的价值
+
+#### 一、`hangdump` 读 debugfs：**永远不可能**
+
+```
+system/sepolicy/private/domain.te:1527
+neverallow { domain -init -vendor_init -dumpstate } debugfs:{ file lnk_file } no_rw_file_perms;
+```
+
+`gaokun3-hangdump.sh` 读 `/sys/kernel/debug/binder/{transactions,failed_transaction_log}`。
+而 `debugfs_binder` 这个类型**在这版策略里根本不存在**（grep 全树零命中），
+所以那些文件就是 `debugfs` 类型，正中这条 neverallow。
+⚠️ 关键是**这条没有 `userdebug_or_eng` 豁免** —— 不是"user 版不行、
+userdebug 行"，是**任何构建下自定义域都不行**。
+
+⇒ 出路只有：把 binder-debugfs 那部分从取证脚本里去掉（改用 `dumpsys binder`
+之类走正常通路的东西），或者接受它在 enforcing 下失效。**不能靠加规则解决。**
+
+#### 二、`smmustall` 要 `/dev/mem`：只在 userdebug 上有可能
+
+```
+system/sepolicy/private/domain.te:2074
+neverallow {
+  domain
+  userdebug_or_eng(`-domain')      ← ★ userdebug/eng 上整条失效
+  -kernel -gsid -init -recovery -ueventd -uncrypt -tee -hal_bootctl_server -fastbootd
+} self:global_capability_class_set sys_rawio;
+```
+
+`smmu-nostall.sh` 用 `/system/bin/devmem` 直接读写 SMMU 的 MMIO。
+本机内核实测 `CONFIG_DEVMEM=y` + `CONFIG_STRICT_DEVMEM=y` +
+**`CONFIG_IO_STRICT_DEVMEM` 未开** —— 后者要是开了连 MMIO 都碰不了，
+这个 workaround 今天能用正是因为它没开。
+
+我们的构建是 `userdebug`（本轮 lunch 实测 `TARGET_BUILD_VARIANT=userdebug`），
+所以那条 neverallow 对我们失效，**技术上可行**。
+但这意味着"能不能 enforcing"取决于构建变体，很脆。
+
+★ **真正的答案是 [TODO B6]**：把 DT 的 gpu_smmu context 中断映射修对，
+这个常驻轮询脚本就整个可以删掉，连带这个 SELinux 问题一起消失。
+**用策略去迁就一个 workaround，不如把 workaround 干掉。**
+
+### ⬜ 又发现两个"从来没人打过标签"的节点
+
+和 `/dev/dri` 完全同类：
+
+* **`/dev/mem`** —— 整棵策略里**没有任何 file_contexts 条目**
+  （`memory_device` 这个类型在这版 AOSP 里也不存在），现在是通用兜底的 `device`
+* **`/dev/fastrpc-*`** —— hexagonrpcd 的命根子，同样没有条目
+
+### ⬜ 下一步（顺序不变）
+
+② 给这批 `device` 兜底标签的字符设备节点定类型（`/dev/mem`、`/dev/fastrpc-*`、
+以及 #60 里那批）；③ `hal_health_default` / `network_stack` 要的 sysfs 子路径；
+④ **换上带域的镜像重新普查一次** —— 只有那份清单能照抄成 allow 规则。
+
+⚠️ ④ 需要设备，本轮设备在用户手上，没做。

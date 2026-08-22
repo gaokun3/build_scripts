@@ -22,7 +22,10 @@ service smmustall /vendor/bin/smmu-nostall.sh
     # 与已验证的 audioroute 服务同款：不给 seclabel 时服务落在 vendor_init
     # 派生域里，devmem 的 /dev/mem 访问在 enforcing 下会被拒（现在是
     # permissive，但迟早要收紧，先按能过的写法来）。
-    seclabel u:r:shell:s0
+    # ⚠️ 这里【曾经】是 `seclabel u:r:shell:s0` —— 让一个 root 守护进程跑在
+    #    为 adb 设计的 shell 域里，方向是反的，转 enforcing 也过不了。
+    #    现在由 sepolicy/file_contexts 给可执行文件打标签，init 自动做域转换
+    #    （sepolicy/gaokun3_scripts.te）。
     disabled
 
 on post-fs-data

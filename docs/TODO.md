@@ -140,23 +140,29 @@ URL 是 **36.9 MB/s**。对"用户走系统内 OTA 升级"有实际影响（1 GB
 ## B. 工程债与正确性
 
 ### B1. SELinux 转 enforcing
-现在是 `permissive`。影响 Play Integrity 与部分带反作弊的游戏。
+**第 1 步已完成**（[#75](stage4-findings.md)，2026-08-23）：给我们自己的
+可执行文件定义了域并打了标签，`m selinux_policy` 与 `sepolicy_neverallows`
+都通过。三个 HAL 直接复用 AOSP 标准域（`hal_sensors_default` /
+`hal_light_default` / `hal_bootctl_default`），**零 allow 规则**；
+4 处 `seclabel u:r:shell:s0` 权宜之计已拆。
 
-★ **已做过一次普查**（[#60](stage4-findings.md)）：988 行 → **237 种**去重元组。
-而普查**推翻了这一条原先的第一步**（"把现有 denial 收集成 `.te`"）——
-我们的服务**根本没有域**：init 起的 root 进程没有 `file_contexts` 条目就留在
-`u:r:init:s0` 里，所以 `hexagonrpcd`、sensors HAL 的 denial 全挂在 `init` 名下。
-照着这样的清单写 `.te`，主体从一开始就是错的。
+⚠️★ **在写第一条 allow 之前就挖出两个结构性阻塞**，这正是"先定义域"的价值：
 
-✅ **已就地清掉 363 条（约全系统 37%）**：`bpf-relabel.sh` 在带 `patches/0007`
-的内核上完全多余，改成"标签已对就 `exit 0`"。⚠️ 顺带记住：**permissive 下的
-denial 不是无害的** —— [#59](stage4-findings.md) 证明日志洪水会把 panic 栈从
-pstore 里挤掉。
+1. **`hangdump` 读 debugfs 永远不可能** —— `domain.te:1527` 那条 neverallow
+   **没有 userdebug 豁免**。出路是把 binder-debugfs 部分从取证脚本里去掉，
+   不是加规则。
+2. **`smmustall` 要 `/dev/mem` + `sys_rawio`** —— 那条 neverallow 带
+   `userdebug_or_eng(\`-domain')`，userdebug 上失效，所以技术可行但
+   **"能不能 enforcing"会取决于构建变体**。★ 真答案是把 **B6** 做掉：
+   DT 中断映射修对，这个轮询脚本整个删掉，SELinux 这道坎一起消失。
 
-**第一步（改过的）**：给 `hexagonrpcd` / sensors HAL / `gaokun3-usbrole` /
-`audioroute` / `smmustall` / `hangdump` / `bpfrelabel` 各定一个域 +
-`file_contexts` 条目。然后是那批 `device : chr_file` —— 那是**设备节点没打类型**
-（`device` 是兜底标签），给节点定类型就一起消失，不必逐条写 allow。
+**剩下的步骤（顺序不能换）**：
+2. 给还是通用 `device` 兜底标签的字符设备节点定类型 —— 已知至少有
+   `/dev/mem` 与 `/dev/fastrpc-*`（两者在整棵 AOSP 策略里**都没有条目**，
+   和 `/dev/dri` 是同一类缺口）
+3. `hal_health_default` / `network_stack` 要的 sysfs 子路径打标签
+4. **换上带域的镜像重新普查一次** —— 只有那份清单能照抄成 allow 规则
+   ⚠️ 需要设备
 
 ### B2. 真温控 HAL
 现在是 AOSP mock（温度恒定 30.1/30.2），框架完全没有真实温控感知。

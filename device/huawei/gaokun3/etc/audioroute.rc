@@ -3,7 +3,10 @@
 service audioroute /vendor/bin/audio-route.sh
     user root
     group root audio
-    seclabel u:r:shell:s0
+    # ⚠️ 这里【曾经】是 `seclabel u:r:shell:s0` —— 让一个 root 守护进程跑在
+    #    为 adb 设计的 shell 域里，方向是反的，转 enforcing 也过不了。
+    #    现在由 sepolicy/file_contexts 给可执行文件打标签，init 自动做域转换
+    #    （sepolicy/gaokun3_scripts.te）。
     oneshot
     disabled
 
