@@ -1,0 +1,13 @@
+# gaokun3 救援/LiveCD 的 sshd。整份覆盖，不做增量 —— 救援系统的登录方式
+# 必须是确定的，不能取决于上游默认值哪天变了。
+Port 22
+PermitRootLogin prohibit-password
+PubkeyAuthentication yes
+# ⚠️ 故意【不开】密码登录：这个系统一开机就是 root，且默认无密码。
+#    开了等于把机器挂在网上。
+PasswordAuthentication no
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+UsePAM no
+PrintMotd yes
+Subsystem sftp /usr/lib/ssh/sftp-server

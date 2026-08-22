@@ -1,0 +1,9 @@
+
+  gaokun3 救援系统 / rescue  (Alpine, 全内存运行)
+
+  这不是装在盘上的系统：根是只读 squashfs + tmpfs overlay，
+  改动重启即失。启动介质挂在 /media/gk3。
+
+  分区/文件系统工具：sgdisk parted resize2fs ntfsresize mkfs.* simg2img
+  安装 Android：     /usr/share/gaokun3/  下有引导链需要的文件
+

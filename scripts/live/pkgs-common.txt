@@ -1,0 +1,52 @@
+# 救援与 LiveCD 都要的东西。一行一个包，# 开头是注释。
+alpine-base
+busybox-extras
+# ★ 静态 busybox —— initramfs 用它，因为 initramfs 里没有 musl 动态库。
+busybox-static
+bash
+# —— 网络：★ 这台机器【只有 WiFi】，没有网口。没有这一组，
+#    救援系统就是一台连不上的机器，等于没有。
+wpa_supplicant
+wpa_supplicant-openrc
+iw
+wireless-regdb
+dhcpcd
+linux-firmware-ath11k
+# —— 远程接入（这台机器没有串口，ssh 是唯一的救命通道）——
+openssh
+openssh-server
+avahi
+avahi-tools
+dbus
+haveged
+# —— 分区与文件系统（这一组就是"救援"两个字的全部含义）——
+gptfdisk
+parted
+util-linux
+util-linux-misc
+e2fsprogs
+e2fsprogs-extra
+dosfstools
+f2fs-tools
+ntfs-3g-progs
+nvme-cli
+lsblk
+blkid
+sfdisk
+# —— 装 Android 要用的 ——
+# ★ simg2img 在 android-tools 里：super.img 是 Android sparse 格式，
+#   直接 dd 会得到一个"校验和对得上但没有 LP 元数据"的分区（本仓踩过）。
+android-tools
+zstd
+xz
+rsync
+curl
+wget
+ca-certificates
+# —— 排障 ——
+pciutils
+usbutils
+file
+less
+strace
+efibootmgr

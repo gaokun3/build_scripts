@@ -1,0 +1,12 @@
+# LiveCD 在 pkgs-common 之上再加的：图形安装器。
+# ★ 不装合成器（weston/wayland）—— 安装器直接画 KMS。理由见
+#   docs/stage7-live-installer.md 第 3 节。
+libdrm
+cairo
+pango
+libinput
+eudev
+# 中文字体。wqy-zenhei 约 5 MiB；Noto CJK 全量 20 MiB 太大，装不进 ESP 预算。
+font-wqy-zenhei
+# 英文回退
+font-dejavu

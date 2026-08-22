@@ -1,0 +1,51 @@
+#!/sbin/openrc-run
+# gaokun3 只有 WiFi，所以"上网"这件事必须开机自己完成，否则救援系统
+# 就是一台连不上的机器。
+#
+# 凭据来源，按优先级：
+#   1. /media/gk3/gaokun3/wpa_supplicant.conf   ← 启动介质上（推荐）
+#   2. /etc/wpa_supplicant/wpa_supplicant.conf  ← 构建时注入
+#
+# ★ 优先用介质上那份，是为了让【镜像本身不含任何凭据】：
+#   公开发布的 LiveCD 不能带别人家的 WiFi 密码，而救援镜像也不该把密码
+#   焊死在只读的 squashfs 里（换了 WiFi 就得重造镜像）。
+
+description="gaokun3 WiFi (wpa_supplicant + dhcpcd)"
+IFACE=wlan0
+MEDIA_CONF=/media/gk3/gaokun3/wpa_supplicant.conf
+IMAGE_CONF=/etc/wpa_supplicant/wpa_supplicant.conf
+
+depend() {
+    need localmount
+    before sshd
+}
+
+start() {
+    if [ ! -e "/sys/class/net/$IFACE" ]; then
+        eerror "没有 $IFACE —— ath11k 没起来？看 dmesg | grep ath11k"
+        return 1
+    fi
+    CONF=
+    [ -f "$MEDIA_CONF" ] && CONF=$MEDIA_CONF
+    [ -z "$CONF" ] && [ -f "$IMAGE_CONF" ] && CONF=$IMAGE_CONF
+    if [ -z "$CONF" ]; then
+        ewarn "找不到 wpa_supplicant.conf —— WiFi 不启动"
+        ewarn "  放一份到 $MEDIA_CONF 再重启即可"
+        return 0
+    fi
+    ebegin "启动 WiFi（配置来自 $CONF）"
+    ip link set "$IFACE" up
+    start-stop-daemon --start --background --make-pidfile \
+        --pidfile /run/wpa_supplicant.pid \
+        --exec /sbin/wpa_supplicant -- -i "$IFACE" -c "$CONF"
+    # dhcpcd 自己会等载波，不用我们轮询
+    start-stop-daemon --start --background --exec /sbin/dhcpcd -- -b "$IFACE"
+    eend 0
+}
+
+stop() {
+    ebegin "停 WiFi"
+    start-stop-daemon --stop --quiet --pidfile /run/wpa_supplicant.pid 2>/dev/null
+    /sbin/dhcpcd -k "$IFACE" 2>/dev/null
+    eend 0
+}
