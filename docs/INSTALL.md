@@ -64,13 +64,23 @@ What you end up with:
 ### About that rescue partition
 
 It is not optional padding. This machine has no recovery partition and no
-serial console, so an ordinary Linux install *is* the recovery environment. It
-is the **default boot entry**, which means a hung Android is one power-button
-press away from a system you can SSH into and repair — with nobody standing
-next to the machine.
+serial console, so an ordinary Linux install *is* the recovery environment: a
+system you can SSH into and repair from, with a full set of partitioning and
+filesystem tools.
 
-That is also why the installer does **not** make Android the default. A nicer
-out-of-the-box experience is not worth losing the only remote way back in.
+**How you get back into it: the 15-second boot menu.** Every boot stops at
+systemd-boot's menu for 15 seconds; the rescue system is one entry there. If
+Android hangs, hold the power button, and pick the rescue entry when the menu
+comes up.
+
+> ⚠️ Do **not** expect the machine to fall back to rescue on its own. The
+> installer does write the rescue system as the default entry, but Android's
+> `boot_control` HAL rewrites `default` to the currently running slot on every
+> boot — by design, so that A/B slot switches survive. So after the first
+> successful Android boot, the default entry *is* Android. Recovering from a
+> hang means somebody picks the rescue entry from the menu. Earlier versions of
+> this document promised an automatic fallback; that promise was never true
+> after first boot, and it has been withdrawn rather than papered over.
 
 To boot Android: choose it from the 15-second menu, or from the rescue system
 

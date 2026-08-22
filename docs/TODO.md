@@ -173,9 +173,16 @@ mock 报的 skin/battery SHUTDOWN 阈值只有 **36 °C**，而
 * BCB 能被消费 → `adb reboot recovery` 与恢复出厂设置才有可能工作
 * 是 AVB/verified boot 的前提
 
-**安全阀**：用 systemd-boot 的 `efi` 指令 chainload 它 —— 起不来就在菜单里
-选别的，救援 Linux 那条路一个字节都不动。
-⚠️ 这是唯一一个"写坏就要人到机器旁"的部件，别在没有安全阀的情况下动它。
+**安全阀已实测可用**（[#73](stage4-findings.md)，2026-08-23）：systemd-boot 的
+`efi` 指令在这台机器上确实能 LoadImage + StartImage 另一个 EFI 应用，
+三轮实验全部自动回到 Android，**没有人碰过机器**。所以"固件不支持 chainload"
+这个顾虑不成立，开发这个部件不需要有人守在机器旁。
+⚠️ 但 `efi` 条目**拿不到 initrd**（`boot.c:2428` 直接按类型返回），
+`devicetree` 倒是照装 —— 拿它引内核必须自带 `panic=10`。
+
+⚠️ **真正的物理约束是 ESP 只剩 28 MB**（296M 用了 268M）。
+里面有 70 MB 的 `Persisted_Capsules.bin` 和 31 MB 的 `EFI/`
+（含已抹除的 Windows 整棵树）。要往 ESP 加东西，先腾地方。
 
 ### B4. LiveCD 打包
 `scripts/install-gaokun3.sh` **从未端到端跑过**。它就是 LiveCD 的内核，
@@ -254,21 +261,6 @@ range in the curve:`（后面是空的，连哪条曲线都没说）。
 3. 构建机用完立刻 `az vm deallocate` 并**取真实退出码**（`| tail` 会吞掉失败）。
    ★ 大文件传输**走 R2 中转**，不要让按分钟计费的构建机干等：
    本轮直连 1 MB/s（2.7 GB 要 45 分钟）vs 上传 R2 43 MB/s（27 秒）。
-
-### D4. ★boot_control HAL 把"默认启动项=救援系统"这条安全网覆盖掉了
-`docs/INSTALL.md` 承诺"Android 挂死 → 拍电源键 → 自动回落到可远程接入的系统"，
-安装器也确实把 `default` 写成救援 Ubuntu。但 boot_control HAL **每次 Android
-启动都把当前槽位镜像进 `loader.conf`**（M6 的设计），于是首次进 Android 之后
-`default` 就变成 `*-android-b.conf` —— **安全网静默失效**，
-而症状只是"`adb reboot` 本想去 Ubuntu 却又回到 Android"。
-
-★ 现在有更好的解法了：[#42](stage4-findings.md) 证明 **Android 能写 EFI 变量**，
-`LoaderEntryOneShot` 可写可回读。
-
-**第一步**：让 HAL 只维护槽位信息、把 `default` 永远留给救援系统，
-需要切槽时写 oneshot 而不是改 default。顺带给设备加一个
-`gaokun3-reboot-to-rescue` 小工具（写 oneshot + reboot），
-远程救援就不再依赖 ESP 手术。
 
 ### D5. PR #3 待回复（已审完，等你定措辞）
 线上那个 PR 动的正是内核预编译这一块。我把要问的整理好了，**没有发到 GitHub**

@@ -3871,3 +3871,94 @@ Linux 真实的: （根本没有 hw_platform 这个文件）  revision = 1.1
 ★ **对照实验要成对**：阳性对照（删配置 → 传感器消失）证明链路通，
 阴性对照（改错地址 → 同样的失败签名）证明失败发生在哪一层。
 只有其中一个，结论都是悬的。
+
+---
+
+## #73 ★★★ chainload 实测**成立** —— 并且我第一轮用错了判据（2026-08-23）
+
+**结论先说：这台机器的 UEFI 支持 chainload。** systemd-boot 的 `efi` 指令能
+LoadImage + StartImage 另一个 EFI 应用，实测跑通并自动回到 Android。
+所以 TODO B3（自研 EFI 加载器）**没有被"固件不支持"堵死**，它的安全阀
+（"起不来就在菜单里选别的"）是**验过的**，不再是假设。
+
+### 为什么这件事本来就该是显然的（但我还是去测了）
+
+`call_image_start()` 是 `linux` 和 `efi` 两种条目**共用的同一个函数**
+（`systemd v259 src/boot/boot.c:2597`）：两者都走
+`make_file_device_path()` → `shim_load_image()`（内部 `BS->LoadImage`）→
+`BS->StartImage`。差别只有两处：
+
+* `initrd_prepare()` 在 `boot.c:2428` 一上来就 `if (entry->type != LOADER_LINUX
+  || !entry->initrd) return;` —— **`efi` 条目拿不到 initrd**。
+* `devicetree_install()`（`boot.c:2688`）**没有类型判断**，`efi` 条目照样装 DTB。
+
+而这台机器**每一次开机**都在做 `LoadImage` 一个未签名的 14 MB PE
+（`android/slot_b/Image`，arm64 EFI stub 本身就是 PE 应用）。
+也就是说 chainload 需要的那条固件通路，天天在跑。
+
+### ⚠️★ 第一轮的判据是错的，差点得出相反结论
+
+我选了 `LoaderImageIdentifier` 当判据：设想"嵌套的 sd-boot 会把它改写成自己的
+路径"。实测它**仍然是 `\EFI\BOOT\BOOTAA64.EFI`**，于是我一度读成"chainload 没
+发生"。
+
+真相在 `systemd v259 src/boot/export-vars.c:36`：
+
+```c
+if (loaded_image->FilePath &&
+    efivar_get_raw(MAKE_GUID_PTR(LOADER), u"LoaderImageIdentifier", NULL, NULL) != EFI_SUCCESS) {
+```
+
+**"只在尚未设置时才写"** —— 外层实例已经写过了，嵌套实例永远不会覆盖它。
+这个判据在物理上就不可能区分两种情况，无论 chainload 成不成立都给同一个值。
+
+★ **教训：选判据的时候要先问"在两种结果下它会不会不同"，
+而不是只问"它听起来像不像能说明问题"。** 一个恒定的观测量不是弱证据，
+它是**零证据**，但读起来跟阴性结果一模一样。
+
+### ★ 真正的签名是自排除规则
+
+`boot.c:1381`：
+
+```c
+/* do not add an entry for ourselves */
+if (strcaseeq16(entry->loader, loaded_image_path)) {
+        entry->type = LOADER_IGNORE;
+        break;
+}
+```
+
+嵌套实例会把"指向它自己那个文件"的条目从菜单里剔掉，而 `LoaderEntries`
+这个 EFI 变量是**最后一个跑的 sd-boot 实例写的**。于是：
+
+**预先声明的预测**（写在实验之前，不是事后解释）：
+把 `systemd-bootaa64.efi` 复制一份成 `ctcopy.efi`，做两个条目
+`chaintest`→原件、`ct2`→副本，把 oneshot 指向 **ct2**。
+若 chainload 成立，下次开机 `LoaderEntries` 里应当**有 chaintest、没有 ct2**。
+
+| 轮次 | oneshot | `LoaderEntries` 实测 | 判定 |
+|---|---|---|---|
+| 无 oneshot（对照） | — | chaintest ✅ ct2 ✅ ct3 ✅ **ct4 ❌** | 基线；ct4 指向不存在的文件被剔除，与 `boot.c:1430` 的存在性检查一致 |
+| 第 1 轮 | chaintest | **chaintest 不见了** | 事后才明白：嵌套实例 = `systemd-bootaa64.efi`，自排除了 chaintest |
+| 第 2 轮 | **ct2** | chaintest ✅ **ct2 不见了** | ★ 与预测逐字一致 ⇒ 跑的是 `ctcopy.efi` 这个嵌套实例 |
+
+三轮都自动回到 Android（`LoaderEntrySelected = …-android-b.conf`），
+全程没有人碰机器。
+
+### 实验为什么是零风险的
+
+* 链路终点是 sd-boot 自己 → 它 `timeout 15` 之后照样启动 `default`（Android）。
+* chainload 失败的话，外层 sd-boot 打印错误 → 回菜单 → 15 秒 → 同一个 default。
+  **两条路都落在可远程接入的系统上**，不需要人按电源键。
+* ⚠️ 反面教材：本来打算用 `efi` 直接引 Android 内核 —— 那会因为
+  `efi` 条目**没有 initrd**（见上）而 panic。真要那么做必须在 options 里带
+  `panic=10`，否则就是"要人到机器旁"。
+
+### 对 B3 的意义
+
+固件这一侧不再是未知数。剩下的都是普通工程量：
+从内存缓冲区 `LoadImage`（引 boot.img 里那份内核）、
+读裸分区上的 `misc`、装 initrd media / DTB 配置表。
+⚠️ 但注意 **ESP 只剩 28 MB（296M 用了 268M，91%）**，
+里面还躺着 70 MB 的 `Persisted_Capsules.bin` 和 31 MB 的
+`EFI/`（含已抹除的 Windows 那一整棵）。要加东西先腾地方。
