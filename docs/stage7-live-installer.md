@@ -1,6 +1,7 @@
 # Stage 7 设计：LiveCD 图形安装器 + 轻量救援系统
 
-> 状态：**M0 构建链已跑通（2026-08-23），但还没在硬件上启动过。**
+> 状态：**M0 构建链跑通，initramfs 与自救路径已在硬件上验过；
+> 完整启动（switch_root → OpenRC → WiFi → ssh）还没做。**
 > 产物实测大小：`gaokun3-rescue.squashfs` **55 MiB** ／ `initramfs.img` **648 KiB**
 > ／ 可启动 U 盘镜像 **152 MiB** —— 它要替掉的是 24.6 GiB 的 Ubuntu 分区。
 > 构建脚本与踩到的六个坑见 [`scripts/live/README.md`](../scripts/live/README.md)。
@@ -159,3 +160,60 @@ super 12 GiB + boot_a/b 128 MiB + metadata 32 MiB + misc 4 MiB
 * [ ] 现有 `scripts/install-gaokun3.sh` 只有"清空整盘"一条路，且**从未端到端跑过**
   （TODO B4）。图形安装器要复用它的分区/写盘逻辑，那就必须先让它可被库调用，
   而不是一个从头跑到尾的脚本。
+
+
+---
+
+## M0 上机结果（2026-08-23 夜）
+
+### ✅ 已在硬件上验过的
+
+**squashfs 镜像本身**（从 Android 挂载复查）：`mount -o ro,loop` 成功，
+`/sbin/init`、`sshd`、`sgdisk`、`wpa_supplicant`、ath11k 固件、
+`/root/.ssh/authorized_keys`、`systemd-bootaa64.efi` 全在，
+`gk3-sshd` / `gk3-wifi` / `avahi-daemon` / `dbus` / `haveged`
+都挂在 default runlevel 上。
+
+**initramfs + 自救路径**（阴性对照，零风险）：
+故意给一个不存在的 `gk3.squash=` 路径启动。
+
+| | 时间 |
+|---|---|
+| 正常 Android 重启（基线） | 约 45 秒 |
+| 阴性对照这一轮 | **120 秒** |
+
+多出的约 75 秒正是设计里的签名：**60 秒诊断等待 + 15 秒启动菜单超时**。
+⇒ 证明 initramfs 能被内核解包、静态 busybox 能跑、`/init` 解析了 cmdline
+并扫了所有分区、**失败之后自己重启并回到了 Android，全程无人干预**。
+
+★ 这一步刻意设计成零风险：无论 initramfs 好坏，机器都会回到能远程接入的系统。
+
+### ⬜ 还没验的（以及为什么今晚不做）
+
+`switch_root` → OpenRC → `gk3-wifi` → sshd 这一段没验。
+
+⚠️ **不做的理由**：这台机器只有 WiFi。如果救援系统起来了但网络没起来，
+它会停在一个连不上的控制台，直到有人按电源键 —— 而本项目自己的规矩是
+**"默认落点必须是能远程接入的系统"**。用户不在场时不该替他承担这个取舍。
+
+**要试的时候**：启动项 `<machine-id>-rescue-alpine.conf` 已经就位，
+squashfs 与 WiFi 配置都在 p3 上，一条 oneshot 就能进：
+
+```sh
+# 在 Android 里（需要 root）
+printf '   ' > /data/local/tmp/os.bin
+printf '%s' "<machine-id>-rescue-alpine.conf" | iconv -t UTF-16LE >> /data/local/tmp/os.bin
+printf '  ' >> /data/local/tmp/os.bin
+cat /data/local/tmp/os.bin > /mnt/efivars/LoaderEntryOneShot-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
+reboot
+```
+
+失败会自动回落到 `default`（当前是 `*-android-a.conf`）；
+**唯一需要人的情况是"起来了但连不上"**。
+
+### ⓘ 当前部署方式是临时的
+
+squashfs 现在放在**救援 Ubuntu 的 p3 分区上**（`/gaokun3/rescue.squashfs`），
+而不是设计里说的独立 1 GiB 分区。
+★ 这么做是**故意的**：验证阶段不动分区表，出问题只需删一个文件。
+等完整启动验过之后，再按设计建独立分区、并把 p3 上那 24.6 GiB 的 Ubuntu 收回。
