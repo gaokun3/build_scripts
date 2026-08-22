@@ -79,3 +79,39 @@
 
 # hexagonrpcd：路径从构建产物核实（out/.../vendor/bin/hexagonrpcd）
 /vendor/bin/hexagonrpcd              u:object_r:hexagonrpcd_exec:s0
+
+# ─────────────────────────────────────────────────────────────────────────
+# 第 2 步：给还是通用兜底标签的节点定类型
+# 证据来自 2026-08-23 的实机普查（用户真实使用中产生的 2095 条 denial，
+# 去重成 25 种元组）。每一条下面都注了是谁在被拒。
+# ─────────────────────────────────────────────────────────────────────────
+
+# ── Venus 硬解服务：★ 第 1 步漏了它 ─────────────────────────────────────
+# 实机 `ps -A -o LABEL` 显示它跑在 u:r:init:s0，denial 里是
+# `comm="DecodeComponent"` 开 /dev/video0 被拒。
+# AOSP 给同类服务用的就是 mediacodec_exec
+# （system/sepolicy/vendor/file_contexts:88 的 c2-default-service）。
+/vendor/bin/hw/android\.hardware\.media\.c2-service-v4l2  u:object_r:mediacodec_exec:s0
+
+# ── 块设备：vold 被拒 `nvme0n1p2 : blk_file` ────────────────────────────
+# 实机 `ls -Z` 确认这些节点现在全是通用兜底的 u:object_r:block_device:s0。
+# ⚠️ 这里写死了分区号，因为本机布局由 scripts/install-gaokun3.sh 固定生成
+#    （by-name 符号链接逐个核对过：p1=esp p2=userdata p3=rescue p4=misc
+#    p5/p6=boot_a/b p8=super p10=metadata）。换布局要同步改这里。
+/dev/block/nvme0n1p2     u:object_r:userdata_block_device:s0
+/dev/block/nvme0n1p4     u:object_r:misc_block_device:s0
+/dev/block/nvme0n1p5     u:object_r:boot_block_device:s0
+/dev/block/nvme0n1p6     u:object_r:boot_block_device:s0
+/dev/block/nvme0n1p8     u:object_r:super_block_device:s0
+/dev/block/nvme0n1p10    u:object_r:metadata_block_device:s0
+
+# ── /dev/fastrpc-*：hexagonrpcd 的命根子，AOSP 里没有对应类型 ───────────
+# 传感器整条链（accel/gyro → SSC → QMI）都走它。此前是通用 device 类型。
+/dev/fastrpc-[a-z]+      u:object_r:gaokun3_fastrpc_device:s0
+
+# ── /dev/mem：整棵 AOSP 策略里【没有任何条目】（memory_device 类型也不存在）──
+# ⚠️ 打上专用类型不是为了给谁开权限，恰恰相反：是为了让"谁在碰它"变得显式。
+#    目前【没有任何域】被允许访问它。唯一的使用者 smmu-nostall.sh 走的是
+#    devmem，而那需要 sys_rawio —— 那条 neverallow 只在 userdebug 上失效。
+#    正解是把 TODO B6 做掉，让这个脚本整个消失。见 #75。
+/dev/mem                 u:object_r:gaokun3_devmem_device:s0

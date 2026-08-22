@@ -4143,3 +4143,82 @@ neverallow {
 ④ **换上带域的镜像重新普查一次** —— 只有那份清单能照抄成 allow 规则。
 
 ⚠️ ④ 需要设备，本轮设备在用户手上，没做。
+
+---
+
+## #76 ★★★ 第二次 denial 普查：真实使用样本，2095 条塌成 25 种（2026-08-23）
+
+[#60](#60) 那次是"开机 1200 秒、未刻意操作"。这次不同：**用户正在用这台机器
+（打开了 QQ 之类的应用）**，所以拿到的是真实使用路径上的拒绝。
+`logcat -b all` 2095 条 + `dmesg` 28 条，按
+`(scontext, tcontext, tclass, perm)` 去重后**只有 25 种**。
+
+| scontext | 条数 | 是什么 |
+|---|---:|---|
+| `untrusted_app` | 984 | ★ **不是我们的问题**（见下） |
+| `shell` | 461 | 我自己的 adb 探测 + `smmustall` 的 devmem |
+| `network_stack` | 236 | 全是 `wlan0/mtu` 一个路径 |
+| `hal_health_default` | 235 | 全是 EC 电池的 `capacity`/`present` |
+| `init` | 92 | ★ 我们那 5 个没有域的服务 |
+| `hal_graphics_composer_default` | 59 | GPU |
+| `system_server` | 33 | 全是 `binder call → u:r:init:s0` |
+
+### ★★ 最重要的一条：一大批 denial 会**自己消失**
+
+`system_server` / `mediaserver` 的那些 `binder { call }`，**tcontext 全是
+`u:r:init:s0`** —— 它们不是"权限不够"，是**在跟卡在 init 域里的我们的 HAL
+说话**。第 1 步给那些二进制打上标签之后，这一整片一条规则都不用写就没了。
+
+⇒ 又一次印证 #60 的顺序判断：**先定义域，再普查**。反过来做，会照着这些
+denial 写出一堆"允许 system_server 调用 init"的荒唐规则。
+
+### ★ 实机点名：到底谁跑在 init 域里
+
+`ps -A -o PID,LABEL,NAME | grep u:r:init:s0` 给了确定答案，不用猜：
+
+```
+414  android.hardware.boot-service.gaokun3
+656  android.hardware.light-service.gaokun3
+659  android.hardware.media.c2-service-v4l2     ← ★ 第 1 步漏了它
+664  android.hardware.sensors-service.gaokun3
+691  hexagonrpcd
+```
+
+★ **`c2-service-v4l2` 是刚做通的 Venus 硬解服务**，#60 那次普查时它还不存在。
+denial 里是 `comm="DecodeComponent"` 开 `/dev/video0` 被拒。
+AOSP 给同类服务用的是 `mediacodec_exec`
+（`system/sepolicy/vendor/file_contexts:88`），照抄即可。
+
+### ✅ 第 3 步（sysfs 标签）证据齐了，而且答案很干净
+
+`network_stack` 与 `hal_health_default` 加起来 471 条，**全部指向
+`/sys/devices/platform/...` 这条真实路径**：
+
+```
+/sys/devices/platform/soc@0/1c00000.pcie/.../net/wlan0/mtu
+/sys/devices/platform/soc@0/ac0000.geniqup/a9c000.i2c/i2c-15/15-0038/
+    huawei_gaokun_ec.psy.0/power_supply/gaokun-ec-battery/capacity
+```
+
+★ **根因**：AOSP 的 `genfs_contexts` 只标了 `/class/net`、`/class/wakeup`、
+`/devices/virtual/...`（`private/genfs_contexts:134,143,156,158`），
+而 `/sys/class/xxx/yyy` 是**符号链接** —— SELinux 标的是真实 inode，
+也就是 `/sys/devices/platform/...`。手机 SoC 的那些路径 AOSP 顺手覆盖了，
+**sc8280xp 的没有**。这又是"AOSP on mainline"独有的缺口，和 `/dev/dri`
+完全同类：**标对了就零 allow 规则**。
+
+同一批证据还定位到另外两处：亮度 HAL 写的 backlight 路径（→`sysfs_leds`）、
+`system_suspend` 读的 xhci wakeup 路径（→`sysfs_wakeup`）。
+
+### ⚠️ `untrusted_app` 那 984 条：**故意不管**
+
+样本是 `com.tencent.mobileqq` 去读 `/cache` 符号链接、`search /proc/asound`。
+这类"应用到处摸一摸被拒"在**原厂 Android 上同样存在**，是策略在正常工作。
+★ **给它们写 allow 是安全倒退**，不是修 bug。记这条是因为
+"denial 数最多的那一类"极容易被当成首要目标。
+
+### ⚠️ 块设备也在裸奔
+
+`vold` 被拒 `nvme0n1p2 : blk_file`。实机 `ls -Z` 确认 **p2(userdata)、
+p8(super) 等全是通用兜底的 `u:object_r:block_device:s0`**，
+而 AOSP 期待的是 `userdata_block_device` / `super_block_device` 这些具体类型。

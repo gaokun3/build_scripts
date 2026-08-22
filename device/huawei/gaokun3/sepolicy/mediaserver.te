@@ -1,0 +1,7 @@
+# mediaserver 读 minigbm 的调试属性。
+#
+# 证据：普查里 `comm="CodecLooper"` 读
+#   /dev/__properties__/u:object_r:vendor_minigbm_debug_prop:s0 被拒。
+# 起因是 gralloc（minigbm）在 mediaserver 进程内被加载，而它会去读
+# vendor.minigbm.debug —— 本机 device.mk 确实设了这个属性。
+get_prop(mediaserver, vendor_minigbm_debug_prop)
