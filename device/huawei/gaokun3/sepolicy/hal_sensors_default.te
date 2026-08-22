@@ -1,0 +1,11 @@
+# 传感器 HAL 走 QRTR（AF_QIPCRTR）跟 SSC 通信。
+#
+# ★ AOSP 的 hal_sensors_default 是为"驱动挂在 AP 上的传感器"写的，
+#   从来不需要 QRTR socket —— 本机的传感器全跑在 SLPI DSP 上，
+#   HAL 只是个 QMI 客户端。这是"AOSP on mainline + 高通 DSP"独有的缺口。
+#
+# 证据：第 4 步普查里 scontext=u:r:hal_sensors_default:s0
+#       tclass=qipcrtr_socket { create getattr read write }。
+# ⚠️ 只写观测到的四个权限。bind/connect 没被拒过 —— 说明这条链路上用不到，
+#    多给等于凭空放权。
+allow hal_sensors_default self:qipcrtr_socket { create getattr read write };

@@ -4222,3 +4222,96 @@ AOSP 给同类服务用的是 `mediacodec_exec`
 `vold` 被拒 `nvme0n1p2 : blk_file`。实机 `ls -Z` 确认 **p2(userdata)、
 p8(super) 等全是通用兜底的 `u:object_r:block_device:s0`**，
 而 AOSP 期待的是 `userdata_block_device` / `super_block_device` 这些具体类型。
+
+---
+
+## #77 ★★★★ SELinux 四步走完 + root 进入 ROM（2026-08-23 夜）
+
+一次装机把两件事一起验了：**ReSukiSU 随 ROM 常驻**，以及 **SELinux 第 1–4 步
+全部落到实机上**。构建戳 `1787436126`，装在 slot_a，`update_engine` 95 秒完成。
+
+### ★ 装机前的一个非显然校验
+
+postinstall 把新内核写进 slot_a 的 ESP 目录之后，
+**`sha256(slot_a/Image)` 与我此前手工放的 ReSukiSU 内核逐字节相同**
+（`7ec8bf2cec625d5e`）。这条比"文件大小对得上"强得多 ——
+它同时证明了：ROM 里的内核确实带 KSU、postinstall 钩子真的跑了、
+而且写进去的就是我验过的那一个。
+
+⚠️★ **顺手拆掉一颗地雷**：`update_engine` 标记 slot_a 为 active 之后，
+boot_control HAL **立刻把 `loader.conf` 的 `default` 改成了 `*-android-a.conf`**
+—— 也就是说，如果 slot_a 起不来，**连回落到已知可用的 slot_b 都没有了**。
+重启前把 `default` 掰回 `*-android-b.conf`，只用 oneshot 去 slot_a。
+（这正是 [#42](#42) 记的那个 HAL 行为，但在"装新 ROM"这个场景下后果最严重。）
+
+### ✅ 结果：init 域里只剩 PID 1
+
+| 进程 | 之前 | 现在 |
+|---|---|---|
+| boot / light / sensors HAL | `u:r:init:s0` | `hal_bootctl_default` / `hal_light_default` / `hal_sensors_default` |
+| `c2-service-v4l2`（Venus 硬解） | `u:r:init:s0` | `mediacodec` |
+| `hexagonrpcd` | `u:r:init:s0` | `hexagonrpcd` |
+| `smmustall` / `hangdump` | `u:r:shell:s0`（权宜之计） | 各自独立域 |
+
+功能零回归：传感器（SH3001 加速度计 + 陀螺仪）照常注册、声卡在、
+`verify-root.sh` **8/8**、WiFi 正常（整晚都靠它连着）。
+
+### ★★ 第 3 步的效果是决定性的：471 条 denial，零 allow 规则
+
+| 主体 | 打标签前 | 打标签后 |
+|---|---:|---:|
+| `network_stack` | 236 | **0** |
+| `hal_health_default` | 235 | **0** |
+
+两者全部来自 `/sys/devices/platform/...`，而 AOSP 的 genfs 只覆盖
+`/class/...`（那是符号链接，SELinux 标的是真实 inode）。
+**四条 `genfscon` 解决 471 条拒绝。** 同一批 `binder → u:r:init:s0`
+的调用（system_server / mediaserver 打给我们的 HAL）也从 33 降到 9。
+
+### ⚠️★ genfscon 是前缀匹配 —— 它会连带盖住下面不该盖的东西
+
+我给 UCSI 的 `power_supply` 子树打了 `sysfs_batteryinfo`，
+结果把它下面的 `wakeup23/name` 也盖了 —— 那个节点本该是 `sysfs_wakeup`。
+症状是 `system_suspend` 从"被拒 `sysfs`"变成"被拒 `sysfs_batteryinfo`"，
+**看起来像修好了一半，其实是换了个错法**。
+⚠️ `wakeupN` 的编号是动态的，没法逐条 genfscon。这一处留着未解，记在这里
+是因为**"denial 的类型变了"很容易被误读成进展**。
+
+### ★ 第 4 步：现在的清单可以照抄了
+
+主体正确之后，我们自己那几个域要什么一目了然，本轮照实机写进策略
+（**只写观测到的权限，一条不多**）：
+
+* `hexagonrpcd` → `gaokun3_fastrpc_device:chr_file rw` + 读 DT 的 `compatible`
+* `hal_sensors_default` → `self:qipcrtr_socket { create getattr read write }`
+  ★ 印证了 [#75](#75) 的预测：AOSP 的传感器 HAL 域从没设想过 QRTR，
+  因为常规设备的传感器挂在 AP 上，而本机的全在 SLPI DSP 上。
+* `hal_bootctl_default` → `sys_admin` + 挂 vfat + 读写 `loader.conf`
+  ⚠️ 这是本设备树里**最重的一组权限**。它存在的唯一原因是引导链没有原生
+  消费 misc 的东西 —— [TODO B3] 的 EFI 加载器做出来之后这一整块可以删掉，
+  而 chainload 已经实测可行（[#73](#73)）。
+* `gaokun3_keyboard` → `sysfs` 读写（枚举 input 设备并写 `inhibited`）
+
+`m selinux_policy` 与 `sepolicy_neverallows` **全部通过**。
+
+### ⚠️★ 两个域【故意不写规则】
+
+* `gaokun3_smmustall`：实测就是 [#75](#75) 预测的那两条
+  （`sys_rawio` + `/dev/mem`）。那条 neverallow 带 `userdebug_or_eng` 豁免，
+  写得进去 —— 但那会让"能不能 enforcing"取决于构建变体。
+  ★ 正解是把 **B6** 做掉，脚本整个消失。
+* `gaokun3_hangdump`：要读别的域的 `/proc`（观测到 init/kernel，
+  而它的职责要求扫**所有**线程），再叠加 debugfs 那条**没有 userdebug 豁免**的
+  neverallow ⇒ 它本质上是 `dumpstate` 那一类特权工具。
+  **给半套权限会让它"能跑但漏进程"，比明确不可用更糟。**
+
+### ⚠️★★ 同一个陷阱今天咬了三次：在挂载点【外面】判绝对符号链接
+
+1. 构建镜像时 `[ -e "$ROOTFS/sbin/init" ]` —— 6 个失败里 5 个是它
+2. 同一次的 `/etc/runlevels/default/*` 检查
+3. 今晚从 Android 挂着 squashfs 复查时，又把 `/sbin/init`、
+   `gk3-sshd`、`gk3-wifi` 三个判成"缺失"
+
+`/sbin/init -> /bin/busybox` 是**绝对**符号链接，从外面看它解析到**宿主的**
+`/bin/busybox`。**判据要么在里面跑（chroot），要么用不跟随链接的方式
+（`ls -l`）并单独确认目标。**

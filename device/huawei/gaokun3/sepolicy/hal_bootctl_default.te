@@ -1,0 +1,17 @@
+# 自研 boot_control HAL 要挂 ESP、改 systemd-boot 的 loader.conf。
+#
+# ★ 为什么一个 boot_control HAL 会去挂文件系统：这台机器不是 fastboot 设备，
+#   槽位切换最终要落到 systemd-boot 的启动项上（见 boot_control/ 的说明）。
+#   misc 仍是唯一真相源，ESP 上那份只是镜像。
+#
+# ⚠️ 这组权限（sys_admin + 挂 vfat + 读写 loader.conf）是本设备树里
+#   **最重的一组**。它之所以存在，是因为引导链没有原生消费 misc 的东西 ——
+#   [TODO B3] 的自研 EFI 加载器做出来之后，这个 HAL 就不必碰 ESP 了，
+#   这一整块可以删掉。chainload 已实测可行（#73），所以那条路是通的。
+#
+# 证据：第 4 步普查，scontext=u:r:hal_bootctl_default:s0，逐条对应。
+allow hal_bootctl_default self:capability sys_admin;
+allow hal_bootctl_default tmpfs:dir { create write add_name mounton };
+allow hal_bootctl_default vfat:filesystem { mount unmount };
+allow hal_bootctl_default vfat:dir { search write add_name remove_name };
+allow hal_bootctl_default vfat:file { create open read write getattr rename unlink };

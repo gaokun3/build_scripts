@@ -17,3 +17,14 @@ init_daemon_domain(hexagonrpcd)
 #      现在是通用兜底的 device 类型，和 /dev/dri 是同一类缺口
 #    * /vendor/etc/hexagonrpcd-root/ 下的只读文件（vendor_file，应当现成）
 #    * QRTR socket（AF_QIPCRTR）—— 传感器 HAL 那边也要
+
+# ── 第 4 步：换上带域的镜像之后重新普查，照实机拒绝写的规则 ──────────────
+# 证据：2026-08-23 slot_a（构建戳 1787436126）开机后的 avc 日志，
+#       scontext 这次是真实主体 u:r:hexagonrpcd:s0。
+
+# 跟 SLPI 上的 DSP 说话。这是传感器整条链的地基。
+allow hexagonrpcd gaokun3_fastrpc_device:chr_file rw_file_perms;
+
+# 读 /sys/firmware/devicetree/base/compatible —— 它用机型串去挑 DSP 侧的配置。
+# ⚠️ 只给读。写 sysfs 它不需要。
+allow hexagonrpcd sysfs:file r_file_perms;

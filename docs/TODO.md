@@ -159,30 +159,31 @@ URL 是 **36.9 MB/s**。对"用户走系统内 OTA 升级"有实际影响（1 GB
 
 ## B. 工程债与正确性
 
-### B1. SELinux 转 enforcing
-**第 1 步已完成**（[#75](stage4-findings.md)，2026-08-23）：给我们自己的
-可执行文件定义了域并打了标签，`m selinux_policy` 与 `sepolicy_neverallows`
-都通过。三个 HAL 直接复用 AOSP 标准域（`hal_sensors_default` /
-`hal_light_default` / `hal_bootctl_default`），**零 allow 规则**；
-4 处 `seclabel u:r:shell:s0` 权宜之计已拆。
+### B1. SELinux 转 enforcing —— **四步已走完，剩两个结构性阻塞**
+[#75](stage4-findings.md) / [#76](stage4-findings.md) / [#77](stage4-findings.md)。
+2026-08-23 夜随构建戳 `1787436126` 装机验收：
 
-⚠️★ **在写第一条 allow 之前就挖出两个结构性阻塞**，这正是"先定义域"的价值：
+* ✅ 第 1 步 定义域 —— **`init` 域里只剩 PID 1**（此前 5 个服务挤在里面）
+* ✅ 第 2 步 设备节点类型（c2 服务、6 个 nvme 分区、`/dev/fastrpc-*`、`/dev/mem`）
+* ✅ 第 3 步 sysfs genfs 标签 —— ★ **`network_stack` 236→0、
+  `hal_health_default` 235→0，零 allow 规则**
+* ✅ 第 4 步 按真实主体写 allow（hexagonrpcd / 传感器 HAL 的 QRTR /
+  boot_control 的挂载 / 键盘），`sepolicy_neverallows` 通过
+* ✅ 功能零回归：传感器、声卡、WiFi、root 8/8
 
-1. **`hangdump` 读 debugfs 永远不可能** —— `domain.te:1527` 那条 neverallow
-   **没有 userdebug 豁免**。出路是把 binder-debugfs 部分从取证脚本里去掉，
-   不是加规则。
-2. **`smmustall` 要 `/dev/mem` + `sys_rawio`** —— 那条 neverallow 带
-   `userdebug_or_eng(\`-domain')`，userdebug 上失效，所以技术可行但
-   **"能不能 enforcing"会取决于构建变体**。★ 真答案是把 **B6** 做掉：
-   DT 中断映射修对，这个轮询脚本整个删掉，SELinux 这道坎一起消失。
+**还剩两个加规则解决不了的**（这才是 enforcing 的真正门槛）：
 
-**剩下的步骤（顺序不能换）**：
-2. 给还是通用 `device` 兜底标签的字符设备节点定类型 —— 已知至少有
-   `/dev/mem` 与 `/dev/fastrpc-*`（两者在整棵 AOSP 策略里**都没有条目**，
-   和 `/dev/dri` 是同一类缺口）
-3. `hal_health_default` / `network_stack` 要的 sysfs 子路径打标签
-4. **换上带域的镜像重新普查一次** —— 只有那份清单能照抄成 allow 规则
-   ⚠️ 需要设备
+1. **`gaokun3_hangdump`** —— 读 debugfs 那条 neverallow
+   （`domain.te:1527`）**没有 userdebug 豁免**；而它还要读所有域的 `/proc`。
+   它本质上是 `dumpstate` 那一类工具。
+   **出路**：binder-debugfs 换成 `dumpsys`，或做成只在 userdebug 启用的诊断件。
+2. **`gaokun3_smmustall`** —— 要 `sys_rawio` + `/dev/mem`。写得进去
+   （那条 neverallow 有 userdebug 豁免），但会让 enforcing 与否取决于构建变体。
+   ★ **正解是先做 B6**，脚本整个消失，这道坎一起没了。
+
+⬜ 另有一处未解：genfscon 是**前缀匹配**，我给 UCSI 的 `power_supply` 打标签
+时连带盖住了它下面的 `wakeup23`（本该是 `sysfs_wakeup`）。`wakeupN` 编号动态，
+逐条 genfscon 不现实。**⚠️ 症状是 denial 的类型变了而不是消失 —— 别误读成进展。**
 
 ### B2. 真温控 HAL
 现在是 AOSP mock（温度恒定 30.1/30.2），框架完全没有真实温控感知。
@@ -274,54 +275,18 @@ range in the curve:`（后面是空的，连哪条曲线都没说）。
 看频率变不变。⚠️ **别在没人看着时做**：M12 记过停/重启 HAL 会污染 SSC 会话，
 自动旋转当场失效、要重启 `hexagonrpcd` 并等约 20 秒才恢复。
 
-### B11. 把 root（ReSukiSU）装进 ROM
-内核这一半已经跑通并实测（[#74](stage4-findings.md)，`scripts/verify-root.sh` 8/8）：
-`CONFIG_KSU=y` + tracepoint 钩子 + 两个补丁，管理器拿到 root、`/data/adb/ksud` 自动就位。
+### B11. root（ReSukiSU）—— ✅ **已随 ROM 常驻**
+2026-08-23 夜装机验收（构建戳 `1787436126`，slot_a）：
+`scripts/verify-root.sh` **8/8**，`/data/adb/ksud` 就位，管理器已装。
+★ postinstall 写进 slot_a 的内核与手工验过的那个 **sha256 逐字节相同**。
 
-**但现在只活在 ESP 的一个实验条目里**（`ksu-full.conf`，oneshot），
-下次重启就回到不带 root 的 `android-b`。要常驻需要：
-* 用带 KSU 的内核重建 boot.img + OTA（构建流程不用改，`kernel-setup-resukisu.sh`
-  已经能把驱动接进内核树）
-* 决定要不要预装管理器 APK。★ **ROM 侧其实什么都不用加** ——
-  `ksud` 就在 APK 的 `lib/arm64-v8a/libksud.so` 里，装 App 即到位。
-* ⚠️ 决定要不要在 cmdline 里给 `kernelsu.allow_shell=1`。**我的建议是不给**：
-  那等于任何能连 adb 的人直接拿 root，没有任何确认。
+⬜ 还剩两个**产品决定**（都不是技术问题）：
+* 要不要预装管理器 APK。★ ROM 侧其实什么都不用加 —— `ksud` 就在 APK 的
+  `lib/arm64-v8a/libksud.so` 里，装 App 即到位。
+* 要不要在 cmdline 给 `kernelsu.allow_shell=1`（adb shell 直接拿 `su`）。
+  **建议不给**：那等于任何能连 adb 的人无确认拿 root。
 
-⚠️ 顺带记一条产品层面的取舍：**root 会影响 Play Integrity 和部分带反作弊的游戏**，
-而本项目的目标之一正是跑手游。这是用户的选择，不是技术障碍，但值得写在发版说明里。
-
-### B10. `release.sh` 应该自己清理 staging 残留
-⚠️ **这是我造成的流程缺陷，不是意外**：历次调试往 R2 传了 `staging/m14c`、
-`m17`…`m21` 各一个约 1 GB 的 payload，**每次都没清**，加上两份完整的
-`staging/<ver>/`，一共堆了 **9 GiB**（桶总量一度 15.6 GiB，而免费额度是 10 GB）。
-2026-08-22 已手工清空，但下次照样会堆。
-
-**第一步**：在 `release.sh` 上传成功之后删掉同版本的 `staging/<ver>/`；
-`scripts/r2-upload.py` 现在有 `--list` / `--du` / `--delete`，够用了。
-⚠️ 删之前必须确认没人引用 —— 这次是逐个核对了 GitHub 发布页正文里的链接
-和 `docs/` 里的 R2 路径才敢删的。
-
----
-
-## C. 上游或硬件层面（本地做不了）
-
-* **磁力计** —— 本机**没有这个硬件**（SSC 亲口回答），所以没有指南针、
-  没有 9 轴融合。不是缺驱动。
-* **指纹（FocalTech FTE7001）、TPM** —— 没有任何驱动存在。
-* **出厂传感器校准** —— 存在本机 Windows 的 DriverData 里、不在任何驱动包中，
-  而 Windows 已抹除 → **永久丢失**。实测无害（单位矩阵恰好与面板方向一致），
-  只影响 bias 精度。⚠️ 给还留着 Windows 的人：先把那个 registry 目录拷出来。
-
----
-
-## D. 运维与安全（需要你动手）
-
-1. ⚠️★ **轮换 R2 的 S3 密钥** —— 它们在聊天记录里出现过多次。
-2. ⚠️ **把 Azure NSG 的 22 端口锁到你的出口 IP** —— 构建机是静态公网 IP，
-   而它曾进过 git 历史（已 filter-branch 抹掉并强推，但 GitHub 仍保留旧对象）。
-3. 构建机用完立刻 `az vm deallocate` 并**取真实退出码**（`| tail` 会吞掉失败）。
-   ★ 大文件传输**走 R2 中转**，不要让按分钟计费的构建机干等：
-   本轮直连 1 MB/s（2.7 GB 要 45 分钟）vs 上传 R2 43 MB/s（27 秒）。
+⚠️ 发版说明里应当写明：**root 会影响 Play Integrity 和部分带反作弊的手游**。
 
 ### D5. PR #3 待回复（已审完，等你定措辞）
 线上那个 PR 动的正是内核预编译这一块。我把要问的整理好了，**没有发到 GitHub**
