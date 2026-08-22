@@ -184,11 +184,19 @@ mock 报的 skin/battery SHUTDOWN 阈值只有 **36 °C**，而
 里面有 70 MB 的 `Persisted_Capsules.bin` 和 31 MB 的 `EFI/`
 （含已抹除的 Windows 整棵树）。要往 ESP 加东西，先腾地方。
 
-### B4. LiveCD 打包
-`scripts/install-gaokun3.sh` **从未端到端跑过**。它就是 LiveCD 的内核，
-但没有人用它从零装过一台机器。
+### B4. LiveCD 图形安装器（★ 已有设计：[stage7-live-installer.md](stage7-live-installer.md)）
+用户 2026-08-23 定的范围：图形化安装流程 + **支持机器上已有别的系统时装 Android**
++ 让用户选装不装救援系统。
 
-**第一步**：在一台可牺牲的机器（或本机，数据已备份）上真跑一次。
+`scripts/install-gaokun3.sh` **从未端到端跑过**，而且只有"清空整盘"一条路。
+要做双系统安装，它得先从"一条道跑到黑的脚本"改成**可被调用的库**
+（探测现有系统 / 算空间 / 缩 NTFS 或 ext4 / 复用对方的 ESP）。
+
+GUI 选型已定：**直接画 KMS + cairo/pango + libinput，不上合成器**
+（理由和被否掉的两个方案见设计文档）。
+⚠️ 必须同时能用键盘操作 —— 万一 himax 触摸没起来，安装器不能变砖。
+
+**第一步**：在一台可牺牲的机器（或本机，数据已备份）上真跑一次现有脚本。
 在那之前，"别人能装"这件事是未经验证的。
 
 ### B6. GPU SMMU 中断根治
@@ -197,11 +205,18 @@ mock 报的 skin/battery SHUTDOWN 阈值只有 **36 °C**，而
 ⚠️ 但只凭"675/680 挂起"推不出正确映射，而且**改错了没有任何征兆**
 （只是继续收不到 fault）。做成之后可以丢掉常驻的 `smmu-nostall.sh` 轮询。
 
-### B7. 救援 Ubuntu 瘦身
-现在 24.6 GiB，一个最小 rootfs 1–2 GiB 就够。刚腾出的 63.9 GiB 未分配空间
-让这件事不再紧迫，但它仍是本机最胖的一块。
-⚠️ 别把它换掉 —— recovery 给不了 `sgdisk`/`resize2fs`/sshd，而这轮重新分区
-正是靠它远程完成的。
+### B7. 用轻量系统替掉救援 Ubuntu（★ 与 B4 是同一件事）
+现在 24.6 GiB 一整套 Ubuntu。设计见 [stage7-live-installer.md](stage7-live-installer.md)：
+**救援系统不再是一个分区** —— 内核 + initramfs + 一个 ≤120 MiB 的 squashfs，
+和 LiveCD 用同一套镜像（两个 profile）。
+
+★ 顺带把 ESP 上那份**独立的救援内核 + initrd（59 MiB）** 也省掉：
+救援与 Android **共用同一个内核**，只是换 initramfs 和 cmdline。
+为此已经在 `kernel-config-android.sh` 里补了 `SQUASHFS=y`（原本是 `=m`）、
+`NTFS3_FS=y`、`NLS_UTF8=y`。
+
+⚠️ 迁移顺序：**先并列装上、ssh 验过真活儿，才删 p3。**
+别把唯一的救援通路换成没验过的东西。
 
 ### B8. `invalid volume index range in the curve` ×12（既有，非回归）
 每次 audioserver 启动都吐 12 条 `E APM_AudioPolicyManager: invalid volume index

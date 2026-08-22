@@ -32,6 +32,21 @@ OUT="${1:?用法: $0 <kernel-out-dir>}"
     --enable USB_CONFIGFS_RNDIS --enable USB_CONFIGFS_EEM \
     --enable OVERLAY_FS
 
+# ---- 让【同一个内核】也能当救援/LiveCD 系统用（见 docs/stage7-live-installer.md）----
+# 今天 ESP 上有两个内核：Android 一个、救援 Ubuntu 一个，白占 14 MiB，
+# 而且两份要各自维护。统一成一个之后，救援系统只是"同一个内核 + 另一个 initramfs"。
+# 这三项对 Android 是惰性的（不挂就没有代价），但缺了救援就起不来：
+#   SQUASHFS  —— 救援 rootfs 是 squashfs；★ 它默认是 =m，而【救援 initramfs 里
+#                没有模块】，和本仓踩过 13 次的「=m 坑」完全同类
+#   NTFS3_FS  —— 双系统安装要缩 Windows 分区，得先能读它
+#   NLS_UTF8  —— FAT 上的非 ASCII 文件名
+# ⚠️★ NTFS3_FS 的 Kconfig 是 `depends on !NTFS_FS || m` —— 只要那个旧的
+#    NTFS_FS 兼容壳还开着（主线删掉 fs/ntfs 之后留下的别名），ntfs3 就被
+#    【钉死在 =m】，`--enable` 写进去也会被 olddefconfig 改回 m。
+#    症状是断言报 "CONFIG_NTFS3_FS=m"，而看 --enable 那行完全看不出原因。
+./scripts/config --file "$OUT/.config" --disable NTFS_FS
+./scripts/config --file "$OUT/.config"     --enable SQUASHFS --enable SQUASHFS_ZSTD --enable SQUASHFS_XZ     --enable NTFS3_FS --enable NLS_UTF8
+
 # ★ Android 的挂起框架依赖 /sys/power/wake_lock（CONFIG_PM_WAKELOCKS）。
 #   缺了它 SystemSuspend 退化到 wakeup_count 模式，而本机 s2idle 恢复是坏的
 #   （EC 挂起坑，Stage 3 起的已知问题），表现为：闲置 45–60 秒后
@@ -279,6 +294,32 @@ OUT="${1:?用法: $0 <kernel-out-dir>}"
 # （/vendor/lib/modules 不存在、lsmod 为空），于是驱动静默缺席。
 # 所以：olddefconfig 由脚本自己跑（顺手把 ARCH=arm64 这个致命参数固定住），
 # 跑完立刻断言关键符号必须是 y，不是就非零退出。
+# ---- ReSukiSU（root）：只有当 drivers/kernelsu 真的接上了才开 ----
+# ★ 自动检测而不是加一个开关：开关会被忘记，而"目录在不在"是事实。
+#   接法见 scripts/kernel-setup-resukisu.sh。
+RESUKISU=0
+if [ -e drivers/kernelsu/Kconfig ]; then
+    RESUKISU=1
+    echo "== 检测到 drivers/kernelsu，启用 CONFIG_KSU（tracepoint 钩子）=="
+    # KSU 是 tristate。Android 侧【不加载模块】—— 本仓已经为 =m 付过 13 次代价，
+    # 所以必须 --enable（=y）而不是 --module。
+    ./scripts/config --file "$OUT/.config" --enable KSU
+    # 钩子方式是一个 choice。上游默认就是 tracepoint，但显式写死：
+    # 默认值会随上游变，而我们不希望"某天 upstream 改了默认"就静默换了实现。
+    ./scripts/config --file "$OUT/.config" --enable KSU_TRACEPOINT_HOOK
+    # ★ sys_enter tracepoint 由 FTRACE_SYSCALLS 提供，而它在本机
+    #   【默认是关的】（HAVE_SYSCALL_TRACEPOINTS=y 只是说架构支持）。
+    #   缺了它 hook/syscall_hook_manager.c 的 register_trace_prio_sys_enter 无处可注册。
+    ./scripts/config --file "$OUT/.config" --enable FTRACE_SYSCALLS
+    # ★ KALLSYMS_ALL：ReSukiSU 要解析 selinux 里几个 static 符号
+    #   （sel_handle_status_ops / security_dump_masked_av / context_struct_compute_av …）。
+    #   Kbuild:137-141 —— 只要 CONFIG_KALLSYMS_ALL=y，整个 tools/static_export_check.mk
+    #   就不会被 include；否则它会 $(error) 逼你去 security/selinux/ 里
+    #   逐个删掉 `static` 关键字。用一个 config 换掉 6 处内核源码改动，
+    #   而且**跨内核升级不用重新对齐**，显然更划算。
+    ./scripts/config --file "$OUT/.config" --enable KALLSYMS_ALL
+fi
+
 echo "== 跑 olddefconfig（ARCH=arm64 必带，否则 arm64 符号会被删光）=="
 # ⚠️★ CROSS_COMPILE 必须带：olddefconfig 会用编译器去评估 CC_HAS_* 之类的
 #   能力符号。在 x86 宿主上不带它就是用【宿主 gcc】评估 arm64 内核，
@@ -300,7 +341,15 @@ CPUSETS_V1 MEMCG_V1 UCLAMP_TASK UCLAMP_TASK_GROUP EFI_ZBOOT EFI_STUB EFI_GENERIC
 MEDIA_SUPPORT MEDIA_PLATFORM_SUPPORT VIDEO_DEV V4L_MEM2MEM_DRIVERS
 VIDEOBUF2_DMA_CONTIG V4L2_MEM2MEM_DEV SM_VIDEOCC_8350 VIDEO_QCOM_VENUS
 EXPERT PM_DEBUG PM_SLEEP_DEBUG PM_ADVANCED_DEBUG DPM_WATCHDOG
+SQUASHFS NTFS3_FS NLS_UTF8
 "
+# 接了 ReSukiSU 才断言 KSU —— 没接的树上断言它只会误报。
+if [ "$RESUKISU" = 1 ]; then
+    MUST_Y="$MUST_Y KSU FTRACE_SYSCALLS KALLSYMS KALLSYMS_ALL"
+    # KSU_TRACEPOINT_HOOK 是 choice 里的 bool，单独断言（上面的循环只认 =y/=m）
+    grep -q '^CONFIG_KSU_TRACEPOINT_HOOK=y' "$OUT/.config" || {
+        echo "  ✗ CONFIG_KSU_TRACEPOINT_HOOK 不是 y —— 钩子方式被换掉了"; }
+fi
 bad=0
 for s in $MUST_Y; do
     v=$(grep -E "^CONFIG_$s=" "$OUT/.config" | cut -d= -f2)
