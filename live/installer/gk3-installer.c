@@ -18,6 +18,7 @@
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdarg.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
@@ -289,8 +290,10 @@ static void gk3_strings_init(void)
 
 /* ── 应用状态 ──────────────────────────────────────────────────────────── */
 /* ⚠️ 顺序 = 向导顺序。ID_BACK 是 screen-- ，所以插新屏时要想清楚它的前一屏。
- *    SC_SHRINK / SC_NET / SC_VARIANT 是【分支】，不在主线上 —— 它们的返回
- *    目标另记在 a->back_to，不能简单 screen--。 */
+ *    SC_SHRINK / SC_NET / SC_VARIANT 是【分支】，不在主线上。
+ *    ⚠️★ 所以【不能】用 screen++/screen-- 导航 —— 分支屏插在枚举中间，
+ *       "来源"页的前一个恰好是 SC_SHRINK，按返回会掉进一个没走过的分支。
+ *       用 nav_go/nav_back 那个栈。 */
 typedef enum {
     SC_WELCOME, SC_DISK, SC_MODE,
     SC_SHRINK,          /* 分支：缩分区 */
@@ -329,7 +332,12 @@ typedef struct {
     bool    failed;
     double  hold;               /* 确认页"按住"进度 0..1 */
 
-    Screen  back_to;            /* 分支屏返回到哪一屏 */
+    /* ★ 导航栈。原先用 screen-- 返回，而分支屏（缩分区/连网/选版本）是插在
+     *   枚举中间的 —— 于是"来源"页按返回会掉进 SC_SHRINK（枚举上的前一个），
+     *   而那是用户根本没走过的分支。用户报的"从选择安装页面回不去"就是它。
+     *   ⚠️ 我在枚举那里写了注释警告过这件事，然后照样用了 screen--。
+     *   栈是唯一可靠的做法：走过哪来的，就回哪去。 */
+    Screen  nav[12]; int nnav;
     int     pending;            /* 待执行的长耗时动作，见 ACT_* */
 
     /* 缩分区 */
@@ -378,6 +386,10 @@ static int  g_pressed = -1;
 static bool g_kbd_used;        /* 用过键盘没有 —— 没用过就不画焦点框 */
 static bool ui_key(App *a, unsigned code, bool shift);
 
+/* 导航栈的两个函数定义在事件那一节，这里先声明 —— bg_finish 要用。 */
+static void nav_go(App *a, Screen to);
+static bool nav_back(App *a);
+
 static const char *human(long mib, char *buf, size_t n)
 {
     if (mib >= 1024 * 1024) snprintf(buf, n, "%.1f TiB", mib / 1024.0 / 1024.0);
@@ -397,6 +409,121 @@ static bool along_ok(App *a, const char **why)
 }
 
 /* ── 各屏 ──────────────────────────────────────────────────────────────── */
+/* ── 软键盘 ────────────────────────────────────────────────────────────────
+ *
+ * ★ 这不是锦上添花：这台机器的键盘是【可拆的】。没有软键盘，用户拆下键盘
+ *   之后就【根本输不了 WiFi 密码】—— 而配网是网络安装的前提。
+ *
+ * 布局按 1280x800 的逻辑坐标算；每个键 108x62，指尖够得着。
+ */
+#define OSK_H 300.0
+static bool g_osk_on;
+static bool g_osk_shift;
+
+static const char *OSK_ROWS[4] = {
+    "1234567890",
+    "qwertyuiop",
+    "asdfghjkl",
+    "zxcvbnm",
+};
+static const char *OSK_ROWS_SH[4] = {
+    "!@#$%^&*()",
+    "QWERTYUIOP",
+    "ASDFGHJKL",
+    "ZXCVBNM",
+};
+
+/* 软键盘的键用负数 id，避免和界面控件撞号 */
+#define ID_OSK_BASE   (-1000)
+#define ID_OSK_SHIFT  (-900)
+#define ID_OSK_BS     (-901)
+#define ID_OSK_SPACE  (-902)
+#define ID_OSK_DONE   (-903)
+
+static void osk_key(cairo_t *cr, double x, double y, double w, double h,
+                    const char *label, int id, bool accent)
+{
+    rrect(cr, x, y, w, h, 10);
+    set_col(cr, accent ? C_SURF2 : C_SURF);
+    cairo_fill(cr);
+    rrect(cr, x, y, w, h, 10);
+    set_col(cr, C_LINE); cairo_set_line_width(cr, 1.5); cairo_stroke(cr);
+    double th = layout_set(cr, label, w, 20, "center");
+    set_col(cr, C_TEXT);
+    cairo_move_to(cr, x, y + (h - th) / 2);
+    pango_cairo_show_layout(cr, g_layout);
+    hit_add(x, y, w, h, id, true);
+}
+
+static void osk_draw(cairo_t *cr)
+{
+    if (!g_osk_on) return;
+    double top = UI_H - OSK_H;
+    /* 底板：把下面的东西盖住，避免键盘和按钮重叠 */
+    cairo_rectangle(cr, 0, top, UI_W, OSK_H);
+    set_col(cr, (Col){0.055, 0.067, 0.082, 1});
+    cairo_fill(cr);
+    set_col(cr, C_LINE);
+    cairo_rectangle(cr, 0, top, UI_W, 2); cairo_fill(cr);
+
+    const char **rows = g_osk_shift ? OSK_ROWS_SH : OSK_ROWS;
+    double kw = 108, kh = 52, gap = 8;
+    for (int r = 0; r < 4; r++) {
+        int n = (int)strlen(rows[r]);
+        double roww = n * kw + (n - 1) * gap;
+        double x = (UI_W - roww) / 2;
+        double y = top + 16 + r * (kh + gap);
+        for (int i = 0; i < n; i++) {
+            char lbl[2] = { rows[r][i], 0 };
+            osk_key(cr, x + i * (kw + gap), y, kw, kh, lbl, ID_OSK_BASE - (r * 16 + i), false);
+        }
+    }
+    /* 末行：Shift / 空格 / 退格 / 完成 */
+    double y = top + 16 + 4 * (kh + gap);
+    osk_key(cr, 120,  y, 150, kh, g_osk_shift ? "⇧ 大写" : "⇧",  ID_OSK_SHIFT, true);
+    osk_key(cr, 286,  y, 500, kh, "空格",                        ID_OSK_SPACE, false);
+    osk_key(cr, 802,  y, 150, kh, "⌫ 退格",                      ID_OSK_BS,    true);
+    osk_key(cr, 968,  y, 190, kh, "完成",                        ID_OSK_DONE,  true);
+}
+
+/* 软键盘的点击。返回 true 表示这个 id 是键盘上的键（已处理）。 */
+static bool osk_tap(int id)
+{
+    if (id > ID_OSK_BASE && id != ID_OSK_SHIFT && id != ID_OSK_BS
+        && id != ID_OSK_SPACE && id != ID_OSK_DONE) return false;
+    if (!g_field_focused && id != ID_OSK_DONE) return true;   /* 没有输入框就吞掉 */
+
+    switch (id) {
+        case ID_OSK_SHIFT: g_osk_shift = !g_osk_shift; return true;
+        case ID_OSK_DONE:  g_osk_on = false; return true;
+        case ID_OSK_BS:
+            if (g_field_focused->len > 0)
+                g_field_focused->buf[--g_field_focused->len] = 0;
+            return true;
+        case ID_OSK_SPACE:
+            if (g_field_focused->len < (int)sizeof g_field_focused->buf - 1) {
+                g_field_focused->buf[g_field_focused->len++] = ' ';
+                g_field_focused->buf[g_field_focused->len] = 0;
+            }
+            return true;
+        default: break;
+    }
+    int idx = ID_OSK_BASE - id;          /* 反算 r*16+i */
+    int r = idx / 16, i = idx % 16;
+    if (r < 0 || r > 3) return true;
+    const char **rows = g_osk_shift ? OSK_ROWS_SH : OSK_ROWS;
+    if (i >= (int)strlen(rows[r])) return true;
+    if (g_field_focused->len < (int)sizeof g_field_focused->buf - 1) {
+        g_field_focused->buf[g_field_focused->len++] = rows[r][i];
+        g_field_focused->buf[g_field_focused->len] = 0;
+    }
+    /* ⚠️ Shift 是一次性的（打完一个字母就回小写）—— 和手机键盘一致。
+     *    常驻大写靠再点一次（这里简化：只做一次性）。 */
+    g_osk_shift = false;
+    return true;
+}
+
+
 static void draw_chrome(cairo_t *cr, const char *title, const char *sub)
 {
     set_col(cr, C_BG); cairo_paint(cr);
@@ -812,6 +939,7 @@ static void draw(cairo_t *cr, App *a)
     }
     /* ★ 焦点框画在最后 —— 于是它对每一种控件都自动生效，
      *   不用去 button()/card()/field_draw() 里各加一遍。 */
+    osk_draw(cr);
     press_flash(cr);
     focus_ring(cr);
 }
@@ -994,6 +1122,61 @@ static void on_variant(const char *line, void *ud)
     if (v->id[0] && v->url[0]) a->nvars++;
 }
 
+/* ── 后台执行 ────────────────────────────────────────────────────────────
+ *
+ * ⚠️★ WiFi 扫描要 3 秒（wpa_cli 之后必须等结果）、连接最多 35 秒
+ *   （关联 20 + DHCP 15）。同步跑的话界面整段冻住 —— 用户的原话是"很卡"。
+ *   而这【不是】渲染慢：实测一帧只要 6 ms。慢的是我在 UI 线程里等外部命令。
+ *
+ * 做法：fork 一个子进程去跑后端，输出写到临时文件；主循环照常重绘
+ * （转圈动画），每轮 waitpid(WNOHANG) 看一眼完成没有。
+ */
+#include <sys/wait.h>
+
+static pid_t g_bg_pid = -1;
+static int   g_bg_act;
+static char  g_bg_file[64];
+static int   g_bg_tick;        /* 转圈动画的帧计数 */
+
+static bool bg_busy(void) { return g_bg_pid > 0; }
+
+static void bg_start(int act, const char *call)
+{
+    if (g_bg_pid > 0) return;                 /* 已经有一个在跑，忽略 */
+    snprintf(g_bg_file, sizeof g_bg_file, "/tmp/gk3-bg-%d", (int)getpid());
+    unlink(g_bg_file);
+    pid_t p = fork();
+    if (p < 0) return;
+    if (p == 0) {
+        /* 子进程：把后端输出写进文件就退出。这里不碰任何 UI 状态。 */
+        char cmd[1200];
+        snprintf(cmd, sizeof cmd, ". %s && %s > %s 2>&1", g_lib, call, g_bg_file);
+        _exit(system(cmd) == 0 ? 0 : 1);
+    }
+    g_bg_pid = p; g_bg_act = act; g_bg_tick = 0;
+}
+
+/* 把子进程写下的结果喂给对应的解析器。返回 true 表示这一轮刚完成。 */
+static bool bg_reap(App *a, void (*cb)(const char *, void *))
+{
+    if (g_bg_pid <= 0) return false;
+    int st;
+    if (waitpid(g_bg_pid, &st, WNOHANG) != g_bg_pid) { g_bg_tick++; return false; }
+    g_bg_pid = -1;
+    FILE *f = fopen(g_bg_file, "r");
+    if (f) {
+        char line[1024];
+        while (fgets(line, sizeof line, f)) {
+            size_t n = strlen(line);
+            while (n && (line[n-1] == 10 || line[n-1] == 13)) line[--n] = 0;
+            if (cb) cb(line, a);
+        }
+        fclose(f);
+    }
+    unlink(g_bg_file);
+    return true;
+}
+
 /* ── 长耗时动作 ──────────────────────────────────────────────────────────
  *
  * ⚠️ 这些会阻塞好几秒到几十秒（扫描 3s、连接 20s、缩分区好几分钟）。
@@ -1003,94 +1186,109 @@ static void on_variant(const char *line, void *ud)
  */
 enum { ACT_NONE = 0, ACT_WIFI_SCAN, ACT_WIFI_CONNECT, ACT_VARIANTS, ACT_SHRINK, ACT_SHRINK_SCAN };
 
+/* 发起一个动作。★ 会阻塞的一律丢到后台，界面继续转圈。 */
 static void do_pending(App *a, int act)
 {
-    char call[512];
+    char call[900];
     switch (act) {
-        case ACT_SHRINK_SCAN: {
+        case ACT_SHRINK_SCAN:
             a->nshr = 0; a->selshr = -1;
-            /* 只问这块盘上的分区 */
-            for (int i = 0; i < a->nparts; i++) {
-                if (a->seldisk < 0) break;
-                if (strncmp(a->parts[i].path, a->disks[a->seldisk].path,
-                            strlen(a->disks[a->seldisk].path))) continue;
-                snprintf(call, sizeof call, "gk3_shrink_info %s", a->parts[i].path);
-                backend(call, on_shrink, a);
-            }
+            if (a->seldisk < 0) break;
+            snprintf(call, sizeof call, "gk3_shrink_scan %s", a->disks[a->seldisk].path);
+            bg_start(act, call);
             break;
-        }
         case ACT_WIFI_SCAN:
-            a->naps = 0; a->selap = -1;
-            backend("gk3_wifi_scan", on_wifi, a);
-            a->net_busy = false;
-            if (a->naps == 0) snprintf(a->net_msg, sizeof a->net_msg, "%s", S_NET_NONE);
+            a->naps = 0; a->selap = -1; a->net_msg[0] = 0;
+            bg_start(act, "gk3_wifi_scan");
             break;
         case ACT_WIFI_CONNECT: {
             if (a->selap < 0 || a->selap >= a->naps) break;
-            /* ⚠️ 密码里可能有单引号，用双引号包不安全。这里做最朴素的转义：
-             *    把单引号换成 '"'"' 。安装器里执行任意命令的风险必须堵死。 */
-            char pw[256]; int k = 0;
+            /* ⚠️ 密码里可能有单引号。安装器里拼 shell 命令必须转义，
+             *    否则一个引号就能执行任意命令。 */
+            char pw[300]; int k = 0;
             for (int i = 0; a->wifi_pw.buf[i] && k < (int)sizeof pw - 8; i++) {
-                if (a->wifi_pw.buf[i] == '\'') {
-                    memcpy(pw + k, "'\"'\"'", 5); k += 5;
-                } else pw[k++] = a->wifi_pw.buf[i];
+                if (a->wifi_pw.buf[i] == 39) { memcpy(pw + k, "'\"'\"'", 5); k += 5; }
+                else pw[k++] = a->wifi_pw.buf[i];
             }
             pw[k] = 0;
-            snprintf(call, sizeof call, "gk3_wifi_connect '%s' '%s' 2>&1",
+            a->net_online = false; a->net_msg[0] = 0;
+            snprintf(call, sizeof call, "gk3_wifi_connect '%s' '%s'",
                      a->aps[a->selap].ssid, pw);
-            a->net_online = false;
-            backend(call, on_net, a);
-            a->net_busy = false;
-            snprintf(a->net_msg, sizeof a->net_msg, "%s",
-                     a->net_online ? "" : S_NET_FAILED);
-            if (a->net_online) {
-                char tmp[200];
-                snprintf(tmp, sizeof tmp, S_NET_CONNECTED, a->net_ssid, a->net_ip);
-                snprintf(a->net_msg, sizeof a->net_msg, "%s", tmp);
-            }
+            bg_start(act, call);
             break;
         }
         case ACT_VARIANTS:
             a->nvars = 0; a->selvar = -1; a->var_msg[0] = 0;
-            backend("gk3_net_manifest", on_variant, a);
-            if (a->nvars == 0) snprintf(a->var_msg, sizeof a->var_msg, "%s", S_VARIANT_FAILED);
+            bg_start(act, "gk3_net_manifest");
             break;
         case ACT_SHRINK: {
             if (a->selshr < 0 || a->selshr >= a->nshr) break;
             long gib = atol(a->shr_size.buf);
-            snprintf(call, sizeof call, "gk3_shrink %s %ld 2>&1",
-                     a->shr[a->selshr].path, gib * 1024);
             a->shr_msg[0] = 0;
-            int rc = backend(call, NULL, NULL);
-            if (rc != 0) {
-                snprintf(a->shr_msg, sizeof a->shr_msg,
-                         "缩小失败。分区表已备份，你的数据应当完好。");
-            } else {
-                /* 缩完要重新探一次磁盘 —— 空闲区变了 */
-                a->nparts = 0; a->nfrees = 0; a->ndisks = 0; a->esp[0] = 0;
-                backend("gk3_probe", on_probe, a);
-                a->screen = SC_MODE;
-                a->mode_wipe = false;
-                recompute_plan(a);
-            }
+            snprintf(call, sizeof call, "gk3_shrink %s %ld",
+                     a->shr[a->selshr].path, gib * 1024);
+            bg_start(act, call);
             break;
         }
         default: break;
     }
 }
 
-/* 命令行逃生口。切到 tty2 之前要把 VT 放回文本模式，否则用户面对的是黑屏。
- * ⚠️ PNG 构建里没有 VT，所以真正的动作由 DRM 后端注册进来（钩子为空就只 chvt）。 */
+/* 后台动作跑完之后的收尾。cb 决定怎么解析输出。 */
+static void bg_finish(App *a, int act)
+{
+    switch (act) {
+        case ACT_WIFI_SCAN:
+            a->net_busy = false;
+            if (a->naps == 0) snprintf(a->net_msg, sizeof a->net_msg, "%s", S_NET_NONE);
+            break;
+        case ACT_WIFI_CONNECT:
+            a->net_busy = false;
+            if (a->net_online) {
+                char tmp[220];
+                snprintf(tmp, sizeof tmp, S_NET_CONNECTED, a->net_ssid, a->net_ip);
+                snprintf(a->net_msg, sizeof a->net_msg, "%s", tmp);
+            } else {
+                snprintf(a->net_msg, sizeof a->net_msg, "%s", S_NET_FAILED);
+            }
+            break;
+        case ACT_VARIANTS:
+            if (a->nvars == 0) snprintf(a->var_msg, sizeof a->var_msg, "%s", S_VARIANT_FAILED);
+            break;
+        case ACT_SHRINK:
+            /* 缩完磁盘布局变了，重新探一次 */
+            a->nparts = 0; a->nfrees = 0; a->ndisks = 0; a->esp[0] = 0;
+            backend("gk3_probe", on_probe, a);
+            if (a->ndisks == 1) a->seldisk = 0;
+            /* 缩完直接回"怎么安装"，栈也一并回退到那里 */
+            while (a->nnav > 0 && a->screen != SC_MODE) nav_back(a);
+            a->screen = SC_MODE; a->mode_wipe = false;
+            recompute_plan(a);
+            break;
+        default: break;
+    }
+}
+
+static void (*bg_parser(int act))(const char *, void *)
+{
+    switch (act) {
+        case ACT_SHRINK_SCAN:   return on_shrink;
+        case ACT_WIFI_SCAN:     return on_wifi;
+        case ACT_WIFI_CONNECT:  return on_net;
+        case ACT_VARIANTS:      return on_variant;
+        default:                return NULL;
+    }
+}
+/* 命令行逃生口。切到 tty2 之前要把 VT 放回文本模式，否则用户面对黑屏。
+ * ⚠️ PNG 构建里没有 VT，真正的动作由 DRM 后端注册进来。 */
 static void (*g_vt_text_hook)(void);
 static void vt_text_for_shell(void)
 {
     if (g_vt_text_hook) g_vt_text_hook();
-    if (system("chvt 2") != 0) { /* 没有 chvt 也不是致命的，用户还能 Ctrl+Alt+F2 */ }
+    if (system("chvt 2") != 0) { /* 没有 chvt 也不致命，用户还能 Ctrl+Alt+F2 */ }
 }
 
-/* 专业分区的默认值。和 installer-lib.sh 里的常量保持一致 ——
- * ⚠️ 两处写死同一组数字是隐患，但把它们从 shell 里读出来要多一次 backend 调用，
- *    而这一屏是"专业选项"，用户会自己改。至少把来源写在这里。 */
+/* 专业分区的默认值。⚠️ 和 installer-lib.sh 里的常量是两处写死的同一组数字。 */
 static void adv_defaults(App *a)
 {
     snprintf(a->adv_super.buf,  sizeof a->adv_super.buf,  "12288");
@@ -1103,20 +1301,38 @@ static void adv_defaults(App *a)
     a->adv_msg[0] = 0;
 }
 
+/* 前进：把当前屏压栈。返回：弹栈。*/
+static void nav_go(App *a, Screen to)
+{
+    if (a->nnav < (int)(sizeof a->nav / sizeof a->nav[0])) a->nav[a->nnav++] = a->screen;
+    a->screen = to;
+}
+static bool nav_back(App *a)
+{
+    if (a->nnav <= 0) return false;      /* 已经在最前面 */
+    a->screen = a->nav[--a->nnav];
+    return true;
+}
+
 /* ── 事件 ──────────────────────────────────────────────────────────────── */
 /* 返回 true 表示需要重绘 */
 static bool on_tap(App *a, int id)
 {
+    if (osk_tap(id)) return true;      /* 软键盘的键，处理完就返回 */
+    /* 点到输入框 → 弹软键盘。★ 键盘可拆，这是唯一的输入途径。 */
+    if (id == ID_NET_PW || id == ID_SHRINK_SIZE || id == ID_ADV_SUPER
+        || id == ID_ADV_RESCUE || id == ID_ADV_DATA) {
+        g_osk_on = true;
+        g_kbd_used = true;
+        for (int i = 0; i < g_nhits; i++) if (g_hits[i].id == id) { g_focus = i; break; }
+        return true;
+    }
     switch (id) {
-        case ID_START:  a->screen = SC_DISK; return true;
+        case ID_START:  nav_go(a, SC_DISK); return true;
         case ID_QUIT:   exit(0);
         case ID_BACK:
-            /* ⚠️ 分支屏（缩分区 / 连网 / 选版本）不能简单 screen-- ——
-             *    它们是从别处跳进来的，回去的目标记在 back_to。 */
-            if (a->screen == SC_SHRINK || a->screen == SC_NET || a->screen == SC_VARIANT)
-                a->screen = a->back_to;
-            else if (a->screen > SC_WELCOME && a->screen < SC_RUN)
-                a->screen--;
+            g_osk_on = false;            /* 换屏时收起软键盘 */
+            nav_back(a);
             return true;
         case ID_SHELL:
             /* 命令行逃生口：切到 tty2（inittab 在那儿留了 getty）。
@@ -1124,27 +1340,27 @@ static bool on_tap(App *a, int id)
             vt_text_for_shell();
             return false;
         case ID_NEXT:
-            if (a->screen == SC_DISK && a->seldisk >= 0) { a->screen = SC_MODE; recompute_plan(a); }
-            else if (a->screen == SC_MODE)    { a->screen = SC_SOURCE; recompute_plan(a); }
+            g_osk_on = false;
+            if (a->screen == SC_DISK && a->seldisk >= 0) { nav_go(a, SC_MODE); recompute_plan(a); }
+            else if (a->screen == SC_MODE)    { nav_go(a, SC_SOURCE); recompute_plan(a); }
             else if (a->screen == SC_SOURCE)  {
-                if (a->src_net) { a->back_to = SC_SOURCE; a->screen = SC_VARIANT;
-                                  a->pending = ACT_VARIANTS; }
-                else a->screen = SC_OPTS;
+                if (a->src_net) { nav_go(a, SC_VARIANT); a->pending = ACT_VARIANTS; }
+                else nav_go(a, SC_OPTS);
             }
-            else if (a->screen == SC_VARIANT && a->selvar >= 0) a->screen = SC_OPTS;
+            else if (a->screen == SC_VARIANT && a->selvar >= 0) nav_go(a, SC_OPTS);
             else if (a->screen == SC_OPTS && !a->plan_err[0])
-                a->screen = a->adv_on ? SC_ADV : SC_CONFIRM;
-            else if (a->screen == SC_ADV)     a->screen = SC_CONFIRM;
+                nav_go(a, a->adv_on ? SC_ADV : SC_CONFIRM);
+            else if (a->screen == SC_ADV)     nav_go(a, SC_CONFIRM);
             return true;
         case ID_MODE_WIPE:  a->mode_wipe = true;  recompute_plan(a); return true;
         case ID_MODE_ALONG: a->mode_wipe = false; recompute_plan(a); return true;
         case ID_MODE_SHRINK:
-            a->back_to = SC_MODE; a->screen = SC_SHRINK;
+            nav_go(a, SC_SHRINK);
             a->pending = ACT_SHRINK_SCAN; return true;
         case ID_SRC_USB: a->src_net = false; return true;
         case ID_SRC_NET:
             a->src_net = true;
-            if (!a->net_online) { a->back_to = SC_SOURCE; a->screen = SC_NET;
+            if (!a->net_online) { nav_go(a, SC_NET);
                                   a->net_busy = true; a->pending = ACT_WIFI_SCAN; }
             return true;
         case ID_NET_RESCAN:  a->net_busy = true; a->net_msg[0] = 0;
@@ -1321,10 +1537,12 @@ int main(int argc, char **argv)
     gk3_strings_init();
 
     const char *png = NULL;
+    int bench = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--png-dir") && i + 1 < argc) png = argv[++i];
         else if (!strcmp(argv[i], "--lib") && i + 1 < argc) g_lib = argv[++i];
         else if (!strcmp(argv[i], "--strings") && i + 1 < argc) gk3_strings_load(argv[++i]);
+        else if (!strcmp(argv[i], "--bench") && i + 1 < argc) bench = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--help")) {
             printf("用法: %s [--png-dir 目录] [--lib installer-lib.sh]\n", argv[0]);
             printf("  --png-dir  离线把每一屏渲染成 PNG（不需要目标硬件）\n");
@@ -1333,6 +1551,7 @@ int main(int argc, char **argv)
     }
     if (png) return run_png(png);
 #ifdef GK3_DRM
+    if (bench) return run_bench(bench);
     return run_drm();
 #else
     fprintf(stderr, "这个构建没有 DRM 后端。用 --png-dir 做离线渲染，或者用 -DGK3_DRM 重新编译。\n");

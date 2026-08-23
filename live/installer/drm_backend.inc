@@ -126,6 +126,23 @@ static size_t g_shadow_size;
 
 static void drm_present(Drm *d, App *a)
 {
+    /* ⚠️ GK3_NO_SHADOW=1 时退回"直接画在显存上"的老行为 —— 只为做 A/B 测量。
+     *    正常使用永远不要开它。 */
+    static int no_shadow = -1;
+    if (no_shadow < 0) no_shadow = getenv("GK3_NO_SHADOW") ? 1 : 0;
+    if (no_shadow) {
+        cairo_surface_t *sd = cairo_image_surface_create_for_data(
+            d->map, CAIRO_FORMAT_RGB24, d->width, d->height, d->pitch);
+        cairo_t *crd = cairo_create(sd);
+        drawing_begin(crd);
+        cairo_translate(crd, d->width, 0);
+        cairo_rotate(crd, M_PI / 2);
+        cairo_scale(crd, GK3_SX(d), GK3_SY(d));
+        draw(crd, a);
+        drawing_end();
+        cairo_destroy(crd); cairo_surface_flush(sd); cairo_surface_destroy(sd);
+        return;
+    }
     if (!g_shadow || g_shadow_size != d->size) {
         free(g_shadow);
         g_shadow = malloc(d->size);
@@ -225,6 +242,31 @@ static void vt_graphics(int on)
     if (g_vt >= 0) ioctl(g_vt, KDSETMODE, on ? KD_GRAPHICS : KD_TEXT);
 }
 
+/* 帧率基准。★ 有它才能把"卡顿"变成一个数字 —— 否则只能凭感觉改。 */
+static int run_bench(int frames)
+{
+    Drm d; memset(&d, 0, sizeof d);
+    if (drm_open(&d) || drm_make_fb(&d)) return 1;
+    App a; memset(&a, 0, sizeof a);
+    a.seldisk = -1; a.selfree = -1; a.mode_wipe = true; a.want_rescue = true;
+    backend("gk3_probe", on_probe, &a);
+    if (a.ndisks == 1) a.seldisk = 0;
+    adv_defaults(&a);
+    const Screen scr[] = { SC_WELCOME, SC_DISK, SC_MODE, SC_OPTS, SC_CONFIRM };
+    double t0 = now_s();
+    for (int i = 0; i < frames; i++) {
+        a.screen = scr[i % 5];
+        drm_present(&d, &a);
+    }
+    double dt = now_s() - t0;
+    fprintf(stderr, "[bench] %d 帧 %.2f 秒 → 每帧 %.1f ms（%.1f fps）%s' + BS + 'n",
+            frames, dt, dt * 1000 / frames, frames / dt,
+            getenv("GK3_NO_SHADOW") ? " [无影子缓冲]" : " [影子缓冲]");
+    if (d.saved) drmModeSetCrtc(d.fd, d.saved->crtc_id, d.saved->buffer_id,
+                                d.saved->x, d.saved->y, &d.conn_id, 1, &d.saved->mode);
+    return 0;
+}
+
 static int run_drm(void)
 {
     Drm d;
@@ -290,9 +332,16 @@ static int run_drm(void)
             dirty = true;
         }
 
+        /* ★ 后台动作：不阻塞界面，每轮看一眼完成没有；没完成就继续转圈。 */
+        if (bg_busy()) {
+            int act = g_bg_act;
+            if (bg_reap(&a, bg_parser(act))) bg_finish(&a, act);
+            dirty = true;
+        }
+
         struct pollfd pfd;
         pfd.fd = libinput_get_fd(li); pfd.events = POLLIN; pfd.revents = 0;
-        poll(&pfd, 1, holding ? 40 : 400);
+        poll(&pfd, 1, (holding || bg_busy()) ? 80 : 400);
         libinput_dispatch(li);
 
         struct libinput_event *ev;

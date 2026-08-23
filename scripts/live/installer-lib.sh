@@ -898,3 +898,16 @@ gk3_net_fetch() {
     fi
     gk3_prog 100 "下载完成"
 }
+
+# 一次问完整块盘上所有分区能不能缩。
+# ⚠️ 界面那边原来是逐个分区调 gk3_shrink_info，每次都要 fork 一个 shell 并
+#    source 整个库 —— 8 个分区就是 8 次。合成一个调用。
+gk3_shrink_scan() {
+    local disk=$1 n part
+    [ -b "$disk" ] || { gk3_die "不是块设备：$disk"; return 1; }
+    for n in $(sgdisk -p "$disk" 2>/dev/null | awk '/^ *[0-9]+ /{print $1}'); do
+        part=$(gk3_partpath "$disk" "$n")
+        [ -b "$part" ] || continue
+        gk3_shrink_info "$part" || true
+    done
+}
