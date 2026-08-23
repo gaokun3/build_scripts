@@ -260,8 +260,12 @@ if [ "$PROFILE" = live ]; then
     say "6c. 编译图形安装器"
     chroot "$ROOTFS" /sbin/apk add --no-cache build-base pkgconf         cairo-dev pango-dev libdrm-dev libinput-dev eudev-dev >/dev/null 2>&1         || die "装不上安装器的构建依赖"
     mkdir -p "$ROOTFS/build"
-    cp "$REPO/live/installer/gk3-installer.c" "$REPO/live/installer/drm_backend.inc"        "$REPO/live/installer/Makefile" "$ROOTFS/build/"
+    cp "$REPO/live/installer/gk3-installer.c" "$REPO/live/installer/drm_backend.inc" "$REPO/live/installer/gk3-strings.h"        "$REPO/live/installer/Makefile" "$ROOTFS/build/"
     chroot "$ROOTFS" /bin/sh -c "cd /build && make drm" || die "安装器编不过"
+    # ★ 断言文案真的编进去了。gk3-strings.h 撞了 POSIX 标准头的名字，
+    #   一旦漏拷会静默包含系统头 —— 编译期报"宏未声明"，但如果哪天宏名恰好
+    #   不冲突，就会编出一个文案全空的界面。这条断言防的是后者。
+    grep -q "$(sed -n 's/^WELCOME.TITLE = //p' "$REPO/live/installer/strings.zh.txt" | head -c 12)"          "$ROOTFS/build/gk3-installer" || die "编出来的二进制里找不到界面文案"
     install -Dm755 "$ROOTFS/build/gk3-installer" "$ROOTFS/usr/bin/gk3-installer"
     rm -rf "$ROOTFS/build"
     # ⚠️ 构建依赖装完就卸掉：它们有几百 MB，而镜像目标是 ≤120 MiB。

@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""从 live/installer/strings.zh.txt 生成 live/installer/strings.h。
+"""从 live/installer/strings.zh.txt 生成 live/installer/gk3-strings.h。
+
+⚠️★ 输出【不能】叫 strings.h —— 那是 POSIX 标准头的名字。一旦它没被
+   拷到构建目录，#include "strings.h" 不会报"文件不存在"，而是静默
+   包含 /usr/include/strings.h，然后吐一堆"宏未声明"。
+   实测踩过：chroot 里编译时就是这么失败的，错误信息完全指不到根因。
 
 改文案的流程：编辑 strings.zh.txt → 跑这个脚本 → 重编。
 ★ 之所以要有这一步，是因为文案散在 C 代码里时，改一句话就要动源码，
@@ -15,7 +20,7 @@ import io, os, re, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE)) if os.path.basename(HERE) == "live" else os.path.dirname(HERE)
 SRC  = os.path.join(ROOT, "live", "installer", "strings.zh.txt")
-DST  = os.path.join(ROOT, "live", "installer", "strings.h")
+DST  = os.path.join(ROOT, "live", "installer", "gk3-strings.h")
 
 # 代码期望的占位符。改代码时这张表要跟着改 —— 它是唯一的真相源。
 EXPECT = {

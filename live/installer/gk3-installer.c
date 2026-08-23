@@ -24,7 +24,7 @@
 #include <math.h>
 #include <cairo/cairo.h>
 #include <pango/pangocairo.h>
-#include "strings.h"
+#include "gk3-strings.h"
 
 #define UI_W 1280.0
 #define UI_H 800.0
