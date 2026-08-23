@@ -320,13 +320,20 @@ cp "$ROOTFS/bin/busybox.static" "$OUT/busybox.static"
 ok "留下 busybox.static 给 initramfs 用"
 
 # ★★ WiFi 固件也要抠出来给 initramfs。
-# ⚠️ 这不是"顺手带上"，是必需的：ath11k 是【内建驱动】（=y），它在内核
-#   启动早期就 probe，那时根文件系统还是 initramfs —— squashfs 里的固件
-#   要等 initramfs 找到介质才存在，**已经晚了**。probe 失败后驱动不会重试，
-#   wlan0 根本不出现。
-#   2026-08-23 上机现象：救援系统起来了但"网卡起不来"。
-#   Android 那边能成，是因为 ueventd 实现了内核的固件用户态助手；
-#   我们的 initramfs 里没有任何东西干这件事，所以固件必须【直接在里面】。
+# ⚠️★ 【假说，尚未证实】ath11k 是内建驱动（CONFIG_ATH11K=y，实机核对过）。
+#   如果它在 switch_root 之前 probe，那时根还是 initramfs，squashfs 里的
+#   固件还不存在 —— probe 失败后驱动不会重试，wlan0 就永远不出现。
+#   2026-08-23 上机现象：救援系统起来了，但用户在屏幕上看到"网卡起不来"。
+#
+#   ⚠️ 但这个解释有一处对不上，必须记下来：Android 的 cmdline 上是
+#   `firmware_class.path=/vendor/firmware/`，而 /vendor 在早期同样没挂上 ——
+#   Android 却能成。**这说明 ath11k 的 probe 本来就是延后的**
+#   （PCIe/电源域晚上电 + deferred_probe_timeout=10）。
+#   果真如此的话，救援系统里 probe 也会晚于 switch_root，squashfs 里的固件
+#   本该够得着，那真因就另有其他。
+#
+#   ★ 所以把固件放进 initramfs 是【消除一个变量】，不是已确诊的修复。
+#   真正能定案的是 gk3-diag 写回介质的 `dmesg | grep ath11k`。
 # ⚠️ 只带本机真正用得到的那颗芯片。整个 ath11k 目录有 7 款芯片、约 23 MiB，
 #    而 initramfs 要放进只剩几十 MB 的 ESP —— 收窄到 WCN6855 只要约 3 MiB。
 #    换机器就改这个变量（gaokun3 是 WCN6855，实测 hw2.0 与 hw2.1 都要带：

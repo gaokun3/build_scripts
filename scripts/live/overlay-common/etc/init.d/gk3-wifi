@@ -30,11 +30,11 @@ start() {
     # lo 自己拉起来：不依赖 ifupdown-ng 的 networking 服务在哪个子包里
     ip link set lo up 2>/dev/null
 
-    # ★ 兜底：ath11k 是内建驱动，在 initramfs 阶段就要固件。正常情况下固件
-    #   已经打进 initramfs（见 build-initramfs.sh --firmware），probe 就成功了。
-    #   万一没赶上，这里【重新绑定一次】—— 此刻 squashfs 已经挂好，
-    #   /lib/firmware 里的固件一定拿得到。
-    #   ⚠️ 这是安全网，不是正解：真正的修复是固件进 initramfs。
+    # ★ 兜底：如果 ath11k 因为任何原因 probe 失败（固件时序是当前最强假说，
+    #   但尚未证实 —— 见 build-rootfs.sh 里那段），这里【重新绑定一次】：
+    #   此刻 squashfs 已挂好，/lib/firmware 里的固件一定拿得到。
+    #   ⚠️ 这是安全网。它成功与否本身就是证据：
+    #      重绑之后 wlan0 出现 ⇒ 确实是"probe 时固件不可达"。
     if [ ! -e "/sys/class/net/$IFACE" ]; then
         ewarn "没有 $IFACE —— 试着重新绑定 ath11k_pci"
         DRV=/sys/bus/pci/drivers/ath11k_pci
