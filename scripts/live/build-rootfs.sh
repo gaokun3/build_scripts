@@ -135,17 +135,27 @@ echo "gaokun3-rescue" > "$ROOTFS/etc/hostname"
 
 # ★ 开机自启：不用 rc-update（要跑目标架构的脚本），直接建符号链接。
 #   OpenRC 的 runlevel 就是一堆指向 /etc/init.d/* 的符号链接，没有别的状态。
+# ⚠️★ 必须【显式】把标准服务也挂上，不能假设 minirootfs 已经配好了 ——
+#   minirootfs 是给 chroot 用的，它的 runlevel 基本是空的。
+#   2026-08-23 上机吃过这个亏：只加了自己的服务，结果 localmount 之类根本
+#   不在 runlevel 里。
 for svc in devfs dmesg sysfs hwdrivers; do
     ln -sf "/etc/init.d/$svc" "$ROOTFS/etc/runlevels/sysinit/$svc" 2>/dev/null || true
 done
 mkdir -p "$ROOTFS/etc/runlevels/default" "$ROOTFS/etc/runlevels/boot"
-for svc in hostname bootmisc syslog; do
+for svc in hostname bootmisc syslog localmount hwclock modules sysctl seedrng urandom procfs; do
     [ -f "$ROOTFS/etc/init.d/$svc" ] && ln -sf "/etc/init.d/$svc" "$ROOTFS/etc/runlevels/boot/$svc"
 done
-for svc in gk3-wifi gk3-sshd dbus avahi-daemon haveged; do
+for svc in gk3-wifi gk3-sshd gk3-diag dbus avahi-daemon haveged; do
     [ -f "$ROOTFS/etc/init.d/$svc" ] && ln -sf "/etc/init.d/$svc" "$ROOTFS/etc/runlevels/default/$svc"
 done
 ok "OpenRC 服务已挂到 runlevel"
+echo "   ── sysinit: $(ls "$ROOTFS/etc/runlevels/sysinit" 2>/dev/null | tr '
+' ' ')"
+echo "   ── boot   : $(ls "$ROOTFS/etc/runlevels/boot"    2>/dev/null | tr '
+' ' ')"
+echo "   ── default: $(ls "$ROOTFS/etc/runlevels/default" 2>/dev/null | tr '
+' ' ')"
 
 # ---- 5. ssh 公钥 ----------------------------------------------------------
 if [ -n "$SSH_KEY" ]; then
@@ -270,6 +280,14 @@ need_path /bin/busybox.static
 need_path /etc/init.d/gk3-wifi
 need_path /etc/runlevels/default/gk3-wifi
 need_path /etc/runlevels/default/gk3-sshd
+need_path /etc/runlevels/default/gk3-diag  # 没网时唯一的取证通路
+need_path /etc/runlevels/boot/localmount     # gk3-* 排在它后面；缺了会打乱顺序
+need_path /etc/runlevels/sysinit/devfs
+# ★ 断言两个服务【没有】硬依赖：`need` 一旦指向不存在的服务，
+#   OpenRC 会静默不启动它 —— 这是 2026-08-23 那次"起来了但没网没 ssh"的真凶。
+if in_ch 'grep -q "need " /etc/init.d/gk3-wifi /etc/init.d/gk3-sshd'; then
+    echo "   ✗ gk3-wifi/gk3-sshd 里还有 need 硬依赖"; BAD=1
+else ok "gk3-* 只用 after 排序依赖，没有 need"; fi
 # ★ 这条断言的由来见上面第 5 步：root 锁着的话，公钥、权限、配置全对也登不进去，
 #   而症状（Permission denied + 通告了 password）会把人引向完全错误的方向。
 if in_ch 'grep -q "^root::" /etc/shadow'; then ok "root 账户未锁定"; else echo "   ✗ root 账户是锁定的 —— ssh 公钥登录会被直接拒绝"; BAD=1; fi

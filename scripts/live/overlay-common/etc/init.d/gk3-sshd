@@ -6,8 +6,8 @@
 description="gaokun3 sshd"
 
 depend() {
-    need localmount
-    after gk3-wifi
+    # ⚠️ 同 gk3-wifi：不用 need，理由见那边的注释。
+    after localmount gk3-wifi
 }
 
 start() {

@@ -16,7 +16,13 @@ MEDIA_CONF=/media/gk3/gaokun3/wpa_supplicant.conf
 IMAGE_CONF=/etc/wpa_supplicant/wpa_supplicant.conf
 
 depend() {
-    need localmount
+    # ⚠️★ 这里【不能】用 `need localmount`。`need` 是硬依赖 —— 目标服务只要
+    #   不在 runlevel 里，本服务就直接不启动，而且不会有明显报错。
+    #   本镜像的根是只读 squashfs + tmpfs overlay，**没有任何东西要挂**，
+    #   这条依赖从头到尾就是多余的。
+    #   2026-08-23 上机：gk3-wifi 与 gk3-sshd 共用这条依赖，于是一起哑掉，
+    #   症状是"救援系统起来了但既没网也没 ssh"，完全无从远程排查。
+    after localmount
     before sshd
 }
 
