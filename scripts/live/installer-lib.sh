@@ -587,3 +587,165 @@ gk3__bylabel() {
     done
     echo ""
 }
+
+# ── 缩分区 ──────────────────────────────────────────────────────────────────
+#
+# ★ 这是安装器里【唯一会去动用户现有数据】的操作，纪律高于别处：
+#
+#   1. 最小能缩到多少【问文件系统】，不自己猜（ntfsresize --info / resize2fs -P）
+#   2. NTFS 必须是干净卸载的。ntfsresize 自己会拒绝带 dirty 位的卷 ——
+#      **不要绕过它**。脏 NTFS 缩 = 数据损坏，而用户往往是因为 Windows
+#      快速启动/休眠才脏的，他自己都不知道盘是脏的。
+#   3. 先演练通过，再真做
+#   4. **先缩文件系统，再缩分区**。反了就是把文件系统截断 —— 直接丢数据
+#   5. 重建分区时保住 PARTUUID：Windows 的 BCD 按 PARTUUID 找系统盘，
+#      换了它 Windows 就起不来（分区还在、数据还在，但引导指向不存在的 UUID）
+
+# 问文件系统"最小能缩到多少 MiB"。问不出来就报 can=no —— 不猜。
+gk3_shrink_info() {
+    local part=$1 fs cur_mib min_mib can why out b bs blocks
+    if [ ! -b "$part" ]; then
+        echo "SHRINK part=$part can=no why=not-a-block-device"; return 1
+    fi
+    fs=$(blkid -o value -s TYPE "$part" 2>/dev/null)
+    cur_mib=$(( $(blockdev --getsize64 "$part" 2>/dev/null || echo 0) / 1048576 ))
+    can=no; why=""; min_mib=""
+    case "$fs" in
+        ntfs)
+            if ! command -v ntfsresize >/dev/null; then
+                why=no-ntfsresize
+            else
+                out=$(ntfsresize --info --force "$part" 2>&1)
+                if [ $? -ne 0 ]; then
+                    # ⚠️ 最常见的原因是卷脏（Windows 快速启动/休眠）。
+                    #    这不是该绕过的错误，是该转达给用户的错误。
+                    case "$out" in
+                        *dirty*|*Dirty*|*unclean*)  why=ntfs-dirty ;;
+                        *"resize support"*)         why=ntfs-unsupported ;;
+                        *)                          why=ntfsresize-failed ;;
+                    esac
+                else
+                    b=$(printf '%s' "$out" | grep -o 'You might resize at [0-9]* bytes' | grep -o '[0-9]*')
+                    if [ -n "$b" ]; then
+                        min_mib=$(( b / 1048576 + 1 )); can=yes
+                    else
+                        why=cannot-parse-min
+                    fi
+                fi
+            fi ;;
+        ext2|ext3|ext4)
+            if ! command -v resize2fs >/dev/null; then
+                why=no-resize2fs
+            else
+                bs=$(dumpe2fs -h "$part" 2>/dev/null | awk -F: '/Block size/{gsub(/ /,"",$2); print $2}')
+                blocks=$(resize2fs -P "$part" 2>/dev/null | grep -o '[0-9]*$')
+                if [ -n "$bs" ] && [ -n "$blocks" ]; then
+                    min_mib=$(( blocks * bs / 1048576 + 1 )); can=yes
+                else
+                    why=cannot-parse-min
+                fi
+            fi ;;
+        "") why=no-filesystem ;;
+        *)  why=fs-not-shrinkable ;;
+    esac
+    echo "SHRINK part=$part fs=${fs:-none} cur_mib=$cur_mib min_mib=${min_mib:-0} can=$can why=$why"
+    [ "$can" = yes ]
+}
+
+# 真的缩。$2 是目标大小（MiB）。
+# ⚠️ 这个函数会改用户的数据，所以它自己把所有前提再验一遍，不依赖调用方。
+gk3_shrink() {
+    local part=$1 target_mib=$2
+    local info fs cur min floor disk num pu pl pt start end bk newpu newmib rc
+    info=$(gk3_shrink_info "$part") || { echo "$info"; return 1; }
+    fs=$(gk3__f "$info" fs); cur=$(gk3__f "$info" cur_mib); min=$(gk3__f "$info" min_mib)
+
+    # 余量：至少给文件系统留 512 MiB。缩到贴着最小值，用户开机就没地方
+    # 写页面文件了 —— 那是"能装上但不能用"。
+    floor=$(( min + 512 ))
+    if [ "$target_mib" -lt "$floor" ]; then
+        gk3_die "目标 ${target_mib} MiB 太小：最小 ${min} + 512 余量 = ${floor} MiB"; return 1
+    fi
+    if [ "$target_mib" -ge "$cur" ]; then
+        gk3_die "目标 ${target_mib} MiB 不小于当前 ${cur} MiB，没必要缩"; return 1
+    fi
+
+    disk=/dev/$(lsblk -no PKNAME "$part" 2>/dev/null | head -1)
+    num=$(cat "/sys/class/block/$(basename "$part")/partition" 2>/dev/null)
+    if [ ! -b "$disk" ] || [ -z "$num" ]; then
+        gk3_die "认不出 $part 属于哪块盘的第几个分区"; return 1
+    fi
+
+    # ★ 保住身份：PARTUUID（Windows BCD 靠它）、PARTLABEL、类型 GUID
+    pu=$(sgdisk -i "$num" "$disk" 2>/dev/null | grep '^Partition unique GUID:' | awk '{print $4}')
+    pl=$(sgdisk -i "$num" "$disk" 2>/dev/null | grep '^Partition name:' | cut -d"'" -f2)
+    pt=$(sgdisk -i "$num" "$disk" 2>/dev/null | grep '^Partition GUID code:' | awk '{print $4}')
+    if [ -z "$pu" ] || [ -z "$pt" ]; then
+        gk3_die "读不到分区 $num 的 GUID —— 不敢重建它"; return 1
+    fi
+    echo "分区 $num 身份：PARTUUID=$pu 类型=$pt 名字=${pl:-(无)}"
+
+    gk3_prog 5 "备份分区表"
+    mount -o remount,rw /media/gk3 2>/dev/null || true
+    bk=/media/gk3/gaokun3/gpt-before-shrink-$(date +%Y%m%d-%H%M%S).bin
+    [ -d /media/gk3/gaokun3 ] || bk=/tmp/gpt-before-shrink.bin
+    if sgdisk --backup="$bk" "$disk" >/dev/null 2>&1; then
+        echo "分区表备份：$bk（还原：sgdisk --load-backup=$bk $disk）"
+    else
+        echo "警告：分区表备份失败"
+    fi
+
+    # ── 第 1 步：缩文件系统（演练 → 真做）───────────────────────────────
+    gk3_prog 15 "演练缩小文件系统"
+    case "$fs" in
+        ntfs)
+            if ! ntfsresize --no-action --force --size "${target_mib}M" "$part" >/dev/null 2>&1; then
+                gk3_die "ntfsresize 演练没通过 —— 不往下做"; return 1
+            fi
+            gk3_prog 30 "缩小 NTFS"
+            # 两个 --force 是 ntfsresize 自己的要求（第二次是确认），不是硬来
+            if ! printf 'y\n' | ntfsresize --force --force --size "${target_mib}M" "$part" >/dev/null 2>&1; then
+                gk3_die "缩小 NTFS 失败 —— 分区表还没动过，数据应当完好"; return 1
+            fi ;;
+        ext2|ext3|ext4)
+            gk3_prog 20 "检查文件系统（resize2fs 要求）"
+            e2fsck -fp "$part" >/dev/null 2>&1; rc=$?
+            # e2fsck 返回 1/2 表示"修好了"；>=4 才是真出事
+            if [ "$rc" -ge 4 ]; then
+                gk3_die "e2fsck 报错（$rc），不敢缩"; return 1
+            fi
+            gk3_prog 30 "缩小 ext 文件系统"
+            if ! resize2fs "$part" "${target_mib}M" >/dev/null 2>&1; then
+                gk3_die "resize2fs 失败 —— 分区表还没动过"; return 1
+            fi ;;
+        *) gk3_die "不支持缩 $fs"; return 1 ;;
+    esac
+
+    # ── 第 2 步：缩分区（文件系统已经小了，这一步才安全）────────────────
+    gk3_prog 70 "改分区表"
+    start=$(sgdisk -i "$num" "$disk" 2>/dev/null | grep '^First sector:' | awk '{print $3}')
+    if [ -z "$start" ]; then
+        gk3_die "读不到分区 $num 的起始扇区"; return 1
+    fi
+    end=$(( start + target_mib * 2048 - 1 ))
+    if ! sgdisk -d "$num" "$disk" >/dev/null 2>&1; then
+        gk3_die "删旧分区项失败"; return 1
+    fi
+    if ! sgdisk -n "${num}:${start}:${end}" -t "${num}:${pt}" -u "${num}:${pu}" "$disk" >/dev/null 2>&1; then
+        gk3_die "重建分区项失败 —— 分区表备份在 $bk"; return 1
+    fi
+    [ -n "$pl" ] && sgdisk -c "${num}:${pl}" "$disk" >/dev/null 2>&1
+    partprobe "$disk" 2>/dev/null || true
+    sleep 1
+
+    # ── 第 3 步：验 ─────────────────────────────────────────────────────
+    gk3_prog 90 "复核"
+    newpu=$(sgdisk -i "$num" "$disk" 2>/dev/null | grep '^Partition unique GUID:' | awk '{print $4}')
+    if [ "$newpu" != "$pu" ]; then
+        gk3_die "PARTUUID 变了（$pu -> $newpu）—— Windows 会起不来"; return 1
+    fi
+    newmib=$(( $(blockdev --getsize64 "$part" 2>/dev/null || echo 0) / 1048576 ))
+    echo "分区 $num：${cur} MiB -> ${newmib} MiB（PARTUUID 未变）"
+    gk3_prog 100 "缩小完成"
+    return 0
+}

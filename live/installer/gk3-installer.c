@@ -157,6 +157,89 @@ static void progress_bar(cairo_t *cr, double x, double y, double w, double pct)
     }
 }
 
+/* ── 文案：运行期加载别的语言 ──────────────────────────────────────────── */
+/* 格式和 strings.zh.txt 一样：ID = 文本，# 开头是注释，字面 \\n 表示换行。
+ * 找不到文件、或者某条缺失时，都用编译进去的中文 —— 缺一条不该让整屏变空。
+ *
+ * ⚠️ 故意【不】做成"翻译不全就报错"：安装器是用户最后的退路，
+ *    宁可中英混排，也不能因为文案不全而起不来。 */
+static char *gk3_str_pool;    /* 一整块，省得逐条 malloc */
+
+static void gk3_unescape(char *t)
+{
+    char *r = t, *w = t;
+    while (*r) {
+        if (r[0] == '\\' && r[1]) {
+            r++;
+            if (*r == 'n')      *w++ = '\n';
+            else if (*r == 't') *w++ = '\t';
+            else                *w++ = *r;
+            r++;
+        } else *w++ = *r++;
+    }
+    *w = 0;
+}
+
+static int gk3_strings_load(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    if (n <= 0 || n > (1 << 20)) { fclose(f); return 0; }
+    free(gk3_str_pool);
+    gk3_str_pool = malloc((size_t)n + 1);
+    if (!gk3_str_pool) { fclose(f); return 0; }
+    size_t got = fread(gk3_str_pool, 1, (size_t)n, f);
+    fclose(f);
+    gk3_str_pool[got] = 0;
+
+    int hit = 0;
+    char *save = NULL;
+    char *line = strtok_r(gk3_str_pool, "\n", &save);
+    for (; line; line = strtok_r(NULL, "\n", &save)) {
+        while (*line == ' ' || *line == '\t') line++;
+        if (!*line || *line == '#') continue;
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        char *val = eq + 1;
+        while (eq > line && (eq[-1] == ' ' || eq[-1] == '\t')) eq--;
+        *eq = 0;
+        while (*val == ' ' || *val == '\t') val++;
+        size_t vl = strlen(val);
+        while (vl && (val[vl-1] == '\r' || val[vl-1] == ' ')) val[--vl] = 0;
+        gk3_unescape(val);
+        for (int i = 0; i < STR__COUNT; i++)
+            if (!strcmp(gk3_str_id[i], line)) { gk3_str_over[i] = val; hit++; break; }
+    }
+    fprintf(stderr, "[gk3] 文案 %s：认到 %d/%d 条\n", path, hit, STR__COUNT);
+    return hit;
+}
+
+/* 按 cmdline 的 gk3.lang= 挑一份文案。zh 就是内置的，不用加载。 */
+static void gk3_strings_init(void)
+{
+    char lang[16] = "zh";
+    FILE *f = fopen("/proc/cmdline", "r");
+    if (f) {
+        char buf[4096];
+        if (fgets(buf, sizeof buf, f)) {
+            char *p = strstr(buf, "gk3.lang=");
+            if (p) {
+                p += 9; int i = 0;
+                while (*p && *p != ' ' && *p != '\n' && i < (int)sizeof lang - 1)
+                    lang[i++] = *p++;
+                lang[i] = 0;
+            }
+        }
+        fclose(f);
+    }
+    if (!strcmp(lang, "zh")) return;
+    char path[256];
+    snprintf(path, sizeof path, "/media/gk3/gaokun3/strings.%s.txt", lang);
+    if (!gk3_strings_load(path))
+        fprintf(stderr, "[gk3] 找不到 %s，用内置中文\n", path);
+}
+
 /* ── 应用状态 ──────────────────────────────────────────────────────────── */
 typedef enum { SC_WELCOME, SC_DISK, SC_MODE, SC_OPTS, SC_CONFIRM, SC_RUN, SC_DONE } Screen;
 
@@ -641,10 +724,14 @@ static int run_png(const char *dir)
 
 int main(int argc, char **argv)
 {
+    /* 文案先加载 —— 后面每一屏都要用，得在画第一帧之前定下来 */
+    gk3_strings_init();
+
     const char *png = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--png-dir") && i + 1 < argc) png = argv[++i];
         else if (!strcmp(argv[i], "--lib") && i + 1 < argc) g_lib = argv[++i];
+        else if (!strcmp(argv[i], "--strings") && i + 1 < argc) gk3_strings_load(argv[++i]);
         else if (!strcmp(argv[i], "--help")) {
             printf("用法: %s [--png-dir 目录] [--lib installer-lib.sh]\n", argv[0]);
             printf("  --png-dir  离线把每一屏渲染成 PNG（不需要目标硬件）\n");

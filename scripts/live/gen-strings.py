@@ -56,14 +56,44 @@ def main():
         for b in bad: sys.stderr.write("!! " + b + chr(10))
         sys.exit(1)
 
+    # ★ 生成【运行期表】而不是编译期字面量宏。
+    #   宏名保持不变（S_WELCOME_TITLE 之类），所以界面代码一行都不用改 ——
+    #   变的只是"字符串从哪来"：启动时能从介质上加载别的语言，加载不到就用
+    #   编译进去的这一份。多语言的空间就是这么留出来的。
     out = []
     out.append("/* 自动生成，请勿手改 —— 改 strings.zh.txt 后跑 scripts/live/gen-strings.py */")
     out.append("#ifndef GK3_STRINGS_H")
     out.append("#define GK3_STRINGS_H")
     out.append("")
+    out.append("enum {")
+    for k, _ in items:
+        out.append("    STR_" + k.replace(".", "_") + ",")
+    out.append("    STR__COUNT")
+    out.append("};")
+    out.append("")
+    out.append("/* 内置文案（中文）。gk3_strings_load() 可以整表替换。 */")
+    out.append("static const char *gk3_str_default[STR__COUNT] = {")
     for k, v in items:
+        out.append("    " + chr(34) + v + chr(34) + ",")
+    out.append("};")
+    out.append("")
+    out.append("/* ID 名字，给加载器按名字对号入座用 */")
+    out.append("static const char *gk3_str_id[STR__COUNT] = {")
+    for k, _ in items:
+        out.append("    " + chr(34) + k + chr(34) + ",")
+    out.append("};")
+    out.append("")
+    out.append("static const char *gk3_str_over[STR__COUNT];   /* 加载进来的覆盖，NULL=用默认 */")
+    out.append("")
+    out.append("static const char *gk3_s(int id)")
+    out.append("{")
+    out.append("    if (id < 0 || id >= STR__COUNT) return " + chr(34) + "?" + chr(34) + ";")
+    out.append("    return gk3_str_over[id] ? gk3_str_over[id] : gk3_str_default[id];")
+    out.append("}")
+    out.append("")
+    for k, _ in items:
         name = "S_" + k.replace(".", "_")
-        out.append("#define " + name.ljust(26) + chr(34) + v + chr(34))
+        out.append("#define " + name.ljust(26) + " gk3_s(STR_" + k.replace(".", "_") + ")")
     out.append("")
     out.append("#endif")
     io.open(DST, "w", encoding="utf-8", newline=chr(10)).write(chr(10).join(out) + chr(10))
