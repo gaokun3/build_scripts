@@ -151,15 +151,14 @@ static void run_install(App *a, Drm *d)
                  a->disks[a->seldisk].path, a->want_rescue ? "yes" : "no");
     else
         snprintf(call, sizeof call,
-                 "gk3_apply --disk %s --mode alongside --rescue %s --region-start %ld --region-end %ld"
-                 " --esp %s --release /media/gk3/gaokun3/payload 2>&1",
+                 "gk3_apply --disk %s --mode alongside --rescue %s --region-start %ld --region-end %ld --esp %s --release /media/gk3/gaokun3/payload 2>&1",
                  a->disks[a->seldisk].path, a->want_rescue ? "yes" : "no",
                  a->frees[a->selfree].start, a->frees[a->selfree].end, a->esp);
 
     char cmd[1400];
     snprintf(cmd, sizeof cmd, ". '%s' && %s", g_lib, call);
     FILE *f = popen(cmd, "r");
-    if (!f) { a->failed = true; snprintf(a->step, sizeof a->step, "起不动安装后端"); a->screen = SC_DONE; return; }
+    if (!f) { a->failed = true; snprintf(a->step, sizeof a->step, S_ERR_BACKEND); a->screen = SC_DONE; return; }
 
     char line[1024];
     while (fgets(line, sizeof line, f)) {
@@ -184,8 +183,8 @@ static void run_install(App *a, Drm *d)
     int rc = pclose(f);
     a->failed = (rc != 0);
     if (a->failed && !a->step[0])
-        snprintf(a->step, sizeof a->step, "安装失败（退出码 %d）", rc);
-    if (!a->failed) { a->pct = 100; snprintf(a->step, sizeof a->step, "完成"); }
+        snprintf(a->step, sizeof a->step, S_ERR_EXIT, rc);
+    if (!a->failed) { a->pct = 100; snprintf(a->step, sizeof a->step, S_STEP_DONE); }
     a->screen = SC_DONE;
     drm_present(d, a);
 }
@@ -284,7 +283,7 @@ static int run_drm(void)
             if (a.hold >= 1.0) {
                 holding = false; a.hold = 1.0;
                 a.screen = SC_RUN; a.pct = 0;
-                snprintf(a.step, sizeof a.step, "准备中……");
+                snprintf(a.step, sizeof a.step, S_STEP_PREP);
                 drm_present(&d, &a);
                 run_install(&a, &d);
                 dirty = true;

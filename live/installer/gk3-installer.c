@@ -24,6 +24,7 @@
 #include <math.h>
 #include <cairo/cairo.h>
 #include <pango/pangocairo.h>
+#include "strings.h"
 
 #define UI_W 1280.0
 #define UI_H 800.0
@@ -201,10 +202,10 @@ static const char *human(long mib, char *buf, size_t n)
 /* 双系统模式可不可用：要有【现成的 ESP】而且要有够大的空闲区 */
 static bool along_ok(App *a, const char **why)
 {
-    if (!a->esp[0]) { *why = "这块盘上没有 EFI 系统分区 —— 说明它上面没有 UEFI 系统可保留"; return false; }
+    if (!a->esp[0]) { *why = S_MODE_WHY_NOESP; return false; }
     long best = 0;
     for (int i = 0; i < a->nfrees; i++) if (a->frees[i].size_mib > best) best = a->frees[i].size_mib;
-    if (best < 20644) { *why = "空闲空间不足 20.2 GiB —— 请先在原系统里压缩分区腾出空间"; return false; }
+    if (best < 20644) { *why = S_MODE_WHY_NOROOM; return false; }
     return true;
 }
 
@@ -220,21 +221,19 @@ static void draw_chrome(cairo_t *cr, const char *title, const char *sub)
 static void sc_welcome(cairo_t *cr, App *a)
 {
     (void)a;
-    draw_chrome(cr, "在这台设备上安装 Android", "HUAWEI MateBook E Go · Snapdragon 8cx Gen 3 (sc8280xp)");
+    draw_chrome(cr, S_WELCOME_TITLE, S_WELCOME_SUB);
     text(cr, 64, 200, UI_W - 128, 19, C_TEXT, "left",
-         "这个安装器会把 Android 装到内置固态硬盘上。\n"
-         "下一步你可以选择清空整个磁盘，或者保留现有系统、只用空闲空间。");
+         S_WELCOME_BODY);
     rrect(cr, 64, 320, UI_W - 128, 110, 14); set_col(cr, C_SURF); cairo_fill(cr);
     text(cr, 96, 344, UI_W - 192, 17, C_MUTED, "left",
-         "这台机器是 UEFI 引导，不是 fastboot 设备。安装完成后由 systemd-boot 启动，\n"
-         "内核和 ramdisk 以普通文件放在 EFI 分区上。");
-    button(cr, 64, UI_H - 140, 300, 88, "开始", ID_START, true, true, false);
-    button(cr, 388, UI_H - 140, 240, 88, "退出到终端", ID_QUIT, false, true, false);
+         S_WELCOME_NOTE);
+    button(cr, 64, UI_H - 140, 300, 88, S_BTN_START, ID_START, true, true, false);
+    button(cr, 388, UI_H - 140, 240, 88, S_BTN_QUIT, ID_QUIT, false, true, false);
 }
 
 static void sc_disk(cairo_t *cr, App *a)
 {
-    draw_chrome(cr, "选择磁盘", "安装目标。可移动介质（安装用的 U 盘）不会列出。");
+    draw_chrome(cr, S_DISK_TITLE, S_DISK_SUB);
     double y = 180;
     char b1[32];
     for (int i = 0; i < a->ndisks && i < 5; i++) {
@@ -249,54 +248,53 @@ static void sc_disk(cairo_t *cr, App *a)
         y += 112;
     }
     if (a->ndisks == 0)
-        text(cr, 64, 200, UI_W - 128, 19, C_DANGER, "left", "没有找到可安装的磁盘。");
-    button(cr, 64, UI_H - 140, 200, 88, "返回", ID_BACK, false, true, false);
-    button(cr, UI_W - 364, UI_H - 140, 300, 88, "下一步", ID_NEXT, true, a->seldisk >= 0, false);
+        text(cr, 64, 200, UI_W - 128, 19, C_DANGER, "left", S_DISK_NONE);
+    button(cr, 64, UI_H - 140, 200, 88, S_BTN_BACK, ID_BACK, false, true, false);
+    button(cr, UI_W - 364, UI_H - 140, 300, 88, S_BTN_NEXT, ID_NEXT, true, a->seldisk >= 0, false);
 }
 
 static void sc_mode(cairo_t *cr, App *a)
 {
-    draw_chrome(cr, "怎么安装", "这一步决定磁盘上现有的东西还在不在。");
+    draw_chrome(cr, S_MODE_TITLE, S_MODE_SUB);
     const char *why = NULL;
     bool can_along = along_ok(a, &why);
     char b1[32];
 
     /* 清空整盘 */
     card(cr, 64, 180, (UI_W - 160) / 2, 300, a->mode_wipe, true);
-    text(cr, 96, 208, 480, 24, C_TEXT, "left", "清空整个磁盘");
-    text(cr, 96, 252, 480, 16, C_DANGER, "left", "磁盘上的所有数据都会被删除，包括其他操作系统。");
+    text(cr, 96, 208, 480, 24, C_TEXT, "left", S_MODE_WIPE_TITLE);
+    text(cr, 96, 252, 480, 16, C_DANGER, "left", S_MODE_WIPE_WARN);
     text(cr, 96, 320, 480, 16, C_MUTED, "left",
-         "布局最干净，Android 拿到全部空间。\n如果这台机器只用来跑 Android，选这个。");
+         S_MODE_WIPE_BODY);
     hit_add(64, 180, (UI_W - 160) / 2, 300, ID_MODE_WIPE, true);
 
     /* 保留现有系统 */
     double x2 = 64 + (UI_W - 160) / 2 + 32;
     card(cr, x2, 180, (UI_W - 160) / 2, 300, !a->mode_wipe, can_along);
-    text(cr, x2 + 32, 208, 480, 24, can_along ? C_TEXT : C_MUTED, "left", "保留现有系统");
+    text(cr, x2 + 32, 208, 480, 24, can_along ? C_TEXT : C_MUTED, "left", S_MODE_ALONG_TITLE);
     if (can_along) {
         long best = 0;
         for (int i = 0; i < a->nfrees; i++) if (a->frees[i].size_mib > best) best = a->frees[i].size_mib;
         text(cr, x2 + 32, 252, 480, 16, C_OK, "left",
-             "只用空闲空间，现有分区一个字节都不动。");
+             S_MODE_ALONG_OK);
         text(cr, x2 + 32, 320, 480, 16, C_MUTED, "left",
-             "可用空闲空间 %s\n复用现有 EFI 分区：%s", human(best, b1, sizeof b1), a->esp);
+             S_MODE_ALONG_INFO, human(best, b1, sizeof b1), a->esp);
     } else {
         text(cr, x2 + 32, 252, 480, 16, C_MUTED, "left", "%s", why ? why : "");
     }
     hit_add(x2, 180, (UI_W - 160) / 2, 300, ID_MODE_ALONG, can_along);
 
-    button(cr, 64, UI_H - 140, 200, 88, "返回", ID_BACK, false, true, false);
-    button(cr, UI_W - 364, UI_H - 140, 300, 88, "下一步", ID_NEXT, true, true, false);
+    button(cr, 64, UI_H - 140, 200, 88, S_BTN_BACK, ID_BACK, false, true, false);
+    button(cr, UI_W - 364, UI_H - 140, 300, 88, S_BTN_NEXT, ID_NEXT, true, true, false);
 }
 
 static void sc_opts(cairo_t *cr, App *a)
 {
-    draw_chrome(cr, "选项", "都有合理的默认值，不确定就直接下一步。");
+    draw_chrome(cr, S_OPTS_TITLE, S_OPTS_SUB);
     card(cr, 64, 180, UI_W - 128, 130, false, true);
-    text(cr, 96, 204, 700, 21, C_TEXT, "left", "同时安装救援系统");
+    text(cr, 96, 204, 700, 21, C_TEXT, "left", S_OPTS_RESCUE_TITLE);
     text(cr, 96, 240, 760, 15, C_MUTED, "left",
-         "一个 1 GiB 的分区，装一套跑在内存里的 Linux（ssh + 分区工具）。\n"
-         "Android 起不来的时候，它是唯一能远程接入的东西。强烈建议保留。");
+         S_OPTS_RESCUE_BODY);
     /* 开关 */
     double sx = UI_W - 210, sy = 218;
     rrect(cr, sx, sy, 120, 56, 28);
@@ -307,22 +305,22 @@ static void sc_opts(cairo_t *cr, App *a)
 
     char b1[32];
     text(cr, 64, 350, UI_W - 128, 17, C_MUTED, "left",
-         "/data 会拿到剩下的全部空间：约 %s",
-         a->plan_userdata_mib > 0 ? human(a->plan_userdata_mib, b1, sizeof b1) : "（下一步计算）");
+         S_OPTS_DATA,
+         a->plan_userdata_mib > 0 ? human(a->plan_userdata_mib, b1, sizeof b1) : S_OPTS_LATER);
     if (a->plan_err[0])
         text(cr, 64, 390, UI_W - 128, 17, C_DANGER, "left", "%s", a->plan_err);
 
-    button(cr, 64, UI_H - 140, 200, 88, "返回", ID_BACK, false, true, false);
-    button(cr, UI_W - 364, UI_H - 140, 300, 88, "下一步", ID_NEXT, true, !a->plan_err[0], false);
+    button(cr, 64, UI_H - 140, 200, 88, S_BTN_BACK, ID_BACK, false, true, false);
+    button(cr, UI_W - 364, UI_H - 140, 300, 88, S_BTN_NEXT, ID_NEXT, true, !a->plan_err[0], false);
 }
 
 static void sc_confirm(cairo_t *cr, App *a)
 {
-    draw_chrome(cr, "最后确认", "越过这一步就会真的写盘了。");
+    draw_chrome(cr, S_CONFIRM_TITLE, S_CONFIRM_SUB);
     char b1[32];
     if (a->mode_wipe) {
         text(cr, 64, 180, UI_W - 128, 22, C_DANGER, "left",
-             "下面这些分区【全部会被删除】：");
+             S_CONFIRM_WIPE_HEAD);
         double y = 224;
         int shown = 0;
         for (int i = 0; i < a->nparts && shown < 6; i++) {
@@ -333,22 +331,22 @@ static void sc_confirm(cairo_t *cr, App *a)
                  p->os[0] ? p->os : "-", p->name[0] ? p->name : (p->fs[0] ? p->fs : "-"));
             y += 30; shown++;
         }
-        if (shown == 0) { text(cr, 96, y, 900, 16, C_MUTED, "left", "（这块盘上目前没有分区）"); y += 30; }
-        if (shown >= 6) { text(cr, 96, y, 900, 15, C_MUTED, "left", "…以及其余分区"); y += 30; }
+        if (shown == 0) { text(cr, 96, y, 900, 16, C_MUTED, "left", S_CONFIRM_NOPARTS); y += 30; }
+        if (shown >= 6) { text(cr, 96, y, 900, 15, C_MUTED, "left", S_CONFIRM_MORE); y += 30; }
     } else {
         text(cr, 64, 180, UI_W - 128, 22, C_OK, "left",
-             "现有分区【一个都不会动】。只使用空闲空间。");
+             S_CONFIRM_ALONG_HEAD);
         text(cr, 96, 230, UI_W - 192, 17, C_MUTED, "left",
-             "会新建 %s 的 Android 分区；EFI 分区 %s 里会多出两个启动项。",
+             S_CONFIRM_ALONG_BODY,
              human(a->frees[a->selfree >= 0 ? a->selfree : 0].size_mib, b1, sizeof b1), a->esp);
     }
     text(cr, 64, 470, UI_W - 128, 17, C_MUTED, "left",
-         "救援系统：%s", a->want_rescue ? "安装" : "不安装");
+         S_CONFIRM_RESCUE, a->want_rescue ? S_WORD_INSTALL : S_WORD_NOINSTALL);
 
     /* 按住确认 —— 触摸屏上单击太容易误触，而这一步不可撤销。
-     * ⚠️ "返回"和确认条【必须同一行、隔开】：第一版把返回摞在确认条正上方，
+     * ⚠️ S_BTN_BACK和确认条【必须同一行、隔开】：第一版把返回摞在确认条正上方，
      *    离屏幕最危险的那个控件只有几像素，手指按下去很容易滑到下面那个。 */
-    button(cr, 64, UI_H - 160, 200, 96, "返回", ID_BACK, false, true, false);
+    button(cr, 64, UI_H - 160, 200, 96, S_BTN_BACK, ID_BACK, false, true, false);
     double bx = 300, by = UI_H - 160, bw = UI_W - 364, bh = 96;
     rrect(cr, bx, by, bw, bh, 16); set_col(cr, C_SURF2); cairo_fill(cr);
     if (a->hold > 0) {
@@ -359,15 +357,15 @@ static void sc_confirm(cairo_t *cr, App *a)
     rrect(cr, bx, by, bw, bh, 16); set_col(cr, C_DANGER);
     cairo_set_line_width(cr, 3); cairo_stroke(cr);
     if (a->hold > 0)
-        text(cr, bx, by + 34, bw, 22, C_TEXT, "center", "按住不放…… %d%%", (int)(a->hold * 100));
+        text(cr, bx, by + 34, bw, 22, C_TEXT, "center", S_CONFIRM_HOLD_BUSY, (int)(a->hold * 100));
     else
-        text(cr, bx, by + 34, bw, 22, C_TEXT, "center", "按住 2 秒开始安装");
+        text(cr, bx, by + 34, bw, 22, C_TEXT, "center", S_CONFIRM_HOLD_IDLE);
     hit_add(bx, by, bw, bh, ID_CONFIRM_HOLD, true);
 }
 
 static void sc_run(cairo_t *cr, App *a)
 {
-    draw_chrome(cr, "正在安装", "请不要断电。");
+    draw_chrome(cr, S_RUN_TITLE, S_RUN_SUB);
     progress_bar(cr, 64, 200, UI_W - 128, a->pct);
     text(cr, 64, 240, UI_W - 128, 21, C_TEXT, "left", "%s", a->step);
     text(cr, UI_W - 200, 240, 136, 21, C_ACCENT, "right", "%d%%", (int)a->pct);
@@ -381,19 +379,18 @@ static void sc_run(cairo_t *cr, App *a)
 static void sc_done(cairo_t *cr, App *a)
 {
     if (a->failed) {
-        draw_chrome(cr, "安装失败", "磁盘可能处于中间状态。");
+        draw_chrome(cr, S_FAIL_TITLE, S_FAIL_SUB);
         text(cr, 64, 200, UI_W - 128, 19, C_DANGER, "left", "%s", a->step);
         double y = 280;
         for (int i = 0; i < a->nlog; i++) { text(cr, 64, y, UI_W - 128, 14, C_MUTED, "left", "%s", a->logtail[i]); y += 24; }
-        button(cr, 64, UI_H - 140, 300, 88, "退出到终端", ID_QUIT, false, true, false);
+        button(cr, 64, UI_H - 140, 300, 88, S_BTN_QUIT, ID_QUIT, false, true, false);
     } else {
-        draw_chrome(cr, "装好了", NULL);
+        draw_chrome(cr, S_DONE_TITLE, NULL);
         text(cr, 64, 200, UI_W - 128, 19, C_TEXT, "left",
-             "重启之后会进入 Android。%s",
-             a->want_rescue ? "\n\n救援系统也装好了：开机时在菜单里可以选它 —— "
-                              "Android 起不来的时候，那是唯一能远程接入的东西。" : "");
-        button(cr, 64, UI_H - 140, 300, 88, "重启", ID_REBOOT, true, true, false);
-        button(cr, 388, UI_H - 140, 240, 88, "退出到终端", ID_QUIT, false, true, false);
+             S_DONE_BODY,
+             a->want_rescue ? S_DONE_RESCUE : "");
+        button(cr, 64, UI_H - 140, 300, 88, S_BTN_REBOOT, ID_REBOOT, true, true, false);
+        button(cr, 388, UI_H - 140, 240, 88, S_BTN_QUIT, ID_QUIT, false, true, false);
     }
 }
 
@@ -495,10 +492,10 @@ static void on_plan(const char *line, void *ud)
     else if (!strncmp(line, "PLANERR ", 8)) {
         char m[64]; kv(line, "msg", m, sizeof m);
         if (!strcmp(m, "not-enough-space"))
-            snprintf(a->plan_err, sizeof a->plan_err, "空间不够：可用 %ld MiB，至少需要 %ld MiB",
+            snprintf(a->plan_err, sizeof a->plan_err, S_ERR_NOSPACE,
                      kvl(line, "avail_mib"), kvl(line, "need_mib"));
         else
-            snprintf(a->plan_err, sizeof a->plan_err, "方案计算失败：%s", m);
+            snprintf(a->plan_err, sizeof a->plan_err, S_ERR_PLAN, m);
     }
 }
 
@@ -521,7 +518,7 @@ static void recompute_plan(App *a)
                  a->disks[a->seldisk].path, a->want_rescue ? "yes" : "no");
     } else {
         int fi = best_free(a);
-        if (fi < 0) { snprintf(a->plan_err, sizeof a->plan_err, "没有可用的空闲区"); return; }
+        if (fi < 0) { snprintf(a->plan_err, sizeof a->plan_err, S_ERR_NOFREE); return; }
         a->selfree = fi;
         snprintf(call, sizeof call,
                  "gk3_plan --disk %s --mode alongside --rescue %s --region-start %ld --region-end %ld --esp %s",
@@ -655,8 +652,7 @@ int main(int argc, char **argv)
 #ifdef GK3_DRM
     return run_drm();
 #else
-    fprintf(stderr, "这个构建没有 DRM 后端。用 --png-dir 做离线渲染，"
-                    "或者用 -DGK3_DRM 重新编译。\n");
+    fprintf(stderr, "这个构建没有 DRM 后端。用 --png-dir 做离线渲染，或者用 -DGK3_DRM 重新编译。\n");
     return 2;
 #endif
 }

@@ -4,22 +4,22 @@
 #   1. \n 表示换行（原样保留，别换成真的换行）
 #   2. %s %d %ld 是占位符，个数和顺序不能改，位置可以挪
 #
-# 改完把这个文件给我，我按 ID 合回代码。
+# 改完跑 `python scripts/live/gen-strings.py` 重新生成 strings.h，再重编即可。
 
 ## 欢迎页 · 大标题
-WELCOME.TITLE = 在这台设备上安装 Android
+WELCOME.TITLE = 让我们在这台电脑上安装 Android
 
 ## 欢迎页 · 副标题
 WELCOME.SUB = HUAWEI MateBook E Go · Snapdragon 8cx Gen 3 (sc8280xp)
 
 ## 欢迎页 · 正文（两行）
-WELCOME.BODY = 这个安装器会把 Android 装到内置固态硬盘上。\n下一步你可以选择清空整个磁盘，或者保留现有系统、只用空闲空间。
+WELCOME.BODY = 我们将把 Android 安装到你的内置固态硬盘上。\n在接下来的步骤中，你可以选择清除整个磁盘，或者保留现有系统，仅使用可用空间。
 
 ## 欢迎页 · 灰底说明框（两行）
-WELCOME.NOTE = 这台机器是 UEFI 引导，不是 fastboot 设备。安装完成后由 systemd-boot 启动，\n内核和 ramdisk 以普通文件放在 EFI 分区上。
+WELCOME.NOTE = 你的设备使用 UEFI 引导，而不是 fastboot。安装完成后，systemd-boot 将为你启动系统，\n内核和 ramdisk 会以普通文件的形式放置在 EFI 分区上。
 
 ## 按钮 · 欢迎页主按钮
-BTN.START = 开始
+BTN.START = 开始使用
 
 ## 按钮 · 退出（欢迎页 / 失败页）
 BTN.QUIT = 退出到终端
@@ -28,88 +28,88 @@ BTN.QUIT = 退出到终端
 BTN.BACK = 返回
 
 ## 按钮 · 各页下一步
-BTN.NEXT = 下一步你可以选择清空整个磁盘，或者保留现有系统、只用空闲空间。
+BTN.NEXT = 下一步
 
 ## 按钮 · 完成页
-BTN.REBOOT = 重启之后会进入 Android。%s
+BTN.REBOOT = 立即重新启动
 
 ## 选盘页 · 标题
-DISK.TITLE = 选择磁盘
+DISK.TITLE = 你想将 Android 安装在哪里？
 
 ## 选盘页 · 副标题
-DISK.SUB = 安装目标。可移动介质（安装用的 U 盘）不会列出。
+DISK.SUB = 选择一个磁盘以继续。可移动介质（例如你正在使用的安装 U 盘）不会显示在这里。
 
 ## 选盘页 · 一块盘都没有时
-DISK.NONE = 没有找到可安装的磁盘。
+DISK.NONE = 我们找不到可以安装的磁盘。请检查你的内置硬盘是否已被识别（可以在终端中运行 lsblk）。
 
 ## 方式页 · 标题
-MODE.TITLE = 怎么安装
+MODE.TITLE = 你希望如何安装？
 
 ## 方式页 · 副标题
-MODE.SUB = 这一步决定磁盘上现有的东西还在不在。
+MODE.SUB = 此选择将决定磁盘上现有内容的去留。请在继续之前仔细确认。
 
 ## 方式页 · 左卡片标题
-MODE.WIPE.TITLE = 下一步你可以选择清空整个磁盘，或者保留现有系统、只用空闲空间。
+MODE.WIPE.TITLE = 清除整个磁盘
 
 ## 方式页 · 左卡片红字
-MODE.WIPE.WARN = 磁盘上的所有数据都会被删除，包括其他操作系统。
+MODE.WIPE.WARN = 此磁盘上的所有内容都将被删除，包括其他操作系统。
 
 ## 方式页 · 左卡片说明（两行）
-MODE.WIPE.BODY = 布局最干净，Android 拿到全部空间。\n如果这台机器只用来跑 Android，选这个。
+MODE.WIPE.BODY = 这将为你提供最干净的分区布局，Android 将获得全部空间。\n如果这台电脑只用来运行 Android，我们建议选择此项。
 
 ## 方式页 · 右卡片标题
-MODE.ALONG.TITLE = 下一步你可以选择清空整个磁盘，或者保留现有系统、只用空闲空间。
+MODE.ALONG.TITLE = 保留现有系统
 
 ## 方式页 · 右卡片绿字
-MODE.ALONG.OK = 只用空闲空间，现有分区一个字节都不动。
+MODE.ALONG.OK = 我们只会使用可用空间，不会对你现有的分区进行任何更改。
 
 ## 方式页 · 右卡片信息（%s=空闲大小, %s=ESP 路径）
-MODE.ALONG.INFO = 可用空闲空间 %s\n复用现有 EFI 分区：%s
+MODE.ALONG.INFO = 可用空间：%s\n我们将重用你现有的 EFI 分区：%s
 
 ## 方式页 · 右卡片禁用原因之一
-MODE.WHY.NOESP = 这块盘上没有 EFI 系统分区 —— 说明它上面没有 UEFI 系统可保留
+MODE.WHY.NOESP = 此磁盘上没有 EFI 系统分区 —— 这意味着它上面没有可以保留的 UEFI 系统
 
 ## 方式页 · 右卡片禁用原因之二
-MODE.WHY.NOROOM = 空闲空间不足 20.2 GiB —— 请先在原系统里压缩分区腾出空间
+MODE.WHY.NOROOM = 可用空间不足 20.2 GiB。请先返回现有系统压缩分区以腾出一些空间（在 Windows 中，可以使用“磁盘管理”来完成此操作）
 
 ## 选项页 · 标题
-OPTS.TITLE = 选项
+OPTS.TITLE = 快速设置
 
 ## 选项页 · 副标题
-OPTS.SUB = 都有合理的默认值，不确定就直接下一步。
+OPTS.SUB = 我们已经为你选择了推荐的设置。如果不确定，直接点击“下一步”即可。
 
 ## 选项页 · 开关标题
 OPTS.RESCUE.TITLE = 同时安装救援系统
 
 ## 选项页 · 开关说明（两行）
-OPTS.RESCUE.BODY = 一个 1 GiB 的分区，装一套跑在内存里的 Linux（ssh + 分区工具）。\nAndroid 起不来的时候，它是唯一能远程接入的东西。强烈建议保留。
+OPTS.RESCUE.BODY = 这将占用 1 GiB 空间，其中包含一套在内存中运行的 Linux（带有 ssh 和分区工具）。\n当 Android 无法启动时，它是远程访问这台设备的唯一方式。我们强烈建议保留此项。
 
 ## 选项页 · /data 预估（%s=大小）
-OPTS.DATA = /data 会拿到剩下的全部空间：约 %s
+OPTS.DATA = /data 将获得所有剩余空间：大约 %s
 
 ## 选项页 · 还没算出来时的占位
-OPTS.LATER = （下一步计算）
+OPTS.LATER = （我们将在下一步为你计算）
 
 ## 确认页 · 标题
-CONFIRM.TITLE = 最后确认
+CONFIRM.TITLE = 在开始之前，请确认一下
 
 ## 确认页 · 副标题
-CONFIRM.SUB = 越过这一步就会真的写盘了。
+CONFIRM.SUB = 这是最后一步。在此之后，我们将开始对磁盘进行更改。
 
 ## 确认页 · 整盘模式抬头（红）
-CONFIRM.WIPE.HEAD = 下面这些分区【全部会被删除】：
+CONFIRM.WIPE.HEAD = 以下分区将【全部被删除】：
 
 ## 确认页 · 盘上没有分区时
-CONFIRM.NOPARTS = （这块盘上目前没有分区）
+CONFIRM.NOPARTS = （此磁盘上目前没有任何分区）
 
 ## 确认页 · 分区太多时的省略行
 CONFIRM.MORE = …以及其余分区
 
 ## 确认页 · 双系统模式抬头（绿）
-CONFIRM.ALONG.HEAD = 现有分区【一个都不会动】。只使用空闲空间。
+CONFIRM.ALONG.HEAD = 你现有的分区【不会受到任何影响】。我们只会使用可用空间。
 
 ## 确认页 · 双系统说明（%s=新分区大小, %s=ESP）
-CONFIRM.ALONG.BODY = 会新建 %s 的 Android 分区；EFI 分区 %s 里会多出两个启动项。
+CONFIRM.ALONG.BODY = 我们将创建 %s 的 Android 分区，并在你的 EFI 分区 %s 中添加两个启动项。
 
 ## 确认页 · 救援系统一行（%s=安装/不安装）
 CONFIRM.RESCUE = 救援系统：%s
@@ -121,49 +121,49 @@ WORD.INSTALL = 安装
 WORD.NOINSTALL = 不安装
 
 ## 确认页 · 红条未按住时
-CONFIRM.HOLD.IDLE = 按住 2 秒开始安装
+CONFIRM.HOLD.IDLE = 按住 2 秒以开始安装
 
 ## 确认页 · 红条按住中（%d=百分比）
-CONFIRM.HOLD.BUSY = 按住不放…… %d%%
+CONFIRM.HOLD.BUSY = 请继续按住…… %d%%
 
 ## 进度页 · 标题
-RUN.TITLE = 正在安装
+RUN.TITLE = 我们正在为你安装 Android
 
 ## 进度页 · 副标题
-RUN.SUB = 请不要断电。
+RUN.SUB = 这可能需要几分钟时间。请不要关闭电源。
 
 ## 完成页 · 标题
-DONE.TITLE = 装好了
+DONE.TITLE = 一切就绪！
 
 ## 完成页 · 正文（%s=救援系统追加段）
-DONE.BODY = 重启之后会进入 Android。%s
+DONE.BODY = 请移除安装介质。重新启动后，你将进入 Android。%s
 
 ## 完成页 · 装了救援系统时追加的一段
-DONE.RESCUE = \n\n救援系统也装好了：开机时在菜单里可以选它 —— Android 起不来的时候，那是唯一能远程接入的东西。
+DONE.RESCUE = \n\n我们还为你安装了救援系统：你可以在开机菜单中选择它。当 Android 无法启动时，它是远程访问这台设备的唯一方式。
 
 ## 失败页 · 标题
-FAIL.TITLE = 安装失败
+FAIL.TITLE = 哎呀，出错了
 
 ## 失败页 · 副标题
-FAIL.SUB = 磁盘可能处于中间状态。
+FAIL.SUB = 你的磁盘可能处于未完成的中间状态。请不要立即重启回原系统 —— 我们建议先保存或拍下下方的日志。
 
 ## 错误 · 空间不足（%ld 可用, %ld 需要）
-ERR.NOSPACE = 空间不够：可用 %ld MiB，至少需要 %ld MiB
+ERR.NOSPACE = 空间不足：当前可用 %ld MiB，但我们至少需要 %ld MiB
 
 ## 错误 · 方案计算失败（%s=后端消息）
-ERR.PLAN = 方案计算失败：%s
+ERR.PLAN = 我们无法计算分区方案：%s
 
 ## 错误 · 没有空闲区
-ERR.NOFREE = 没有可用的空闲区
+ERR.NOFREE = 此磁盘上没有可用空间
 
 ## 错误 · 后端起不来
-ERR.BACKEND = 起不动安装后端
+ERR.BACKEND = 我们无法启动安装后端
 
 ## 错误 · 后端非零退出（%d=退出码）
-ERR.EXIT = 安装失败（退出码 %d）
+ERR.EXIT = 安装未能完成（退出码 %d）
 
 ## 进度 · 起步
-STEP.PREP = 准备中……
+STEP.PREP = 正在准备一些事情……
 
 ## 进度 · 收尾
-STEP.DONE = 这台机器是 UEFI 引导，不是 fastboot 设备。安装完成后由 systemd-boot 启动，\n内核和 ramdisk 以普通文件放在 EFI 分区上。
+STEP.DONE = 即将完成……
