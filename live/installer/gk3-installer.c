@@ -107,10 +107,19 @@ static Hit  g_hits[MAX_HITS];
 static int  g_nhits;
 static void hit_reset(void) { g_nhits = 0; }
 
-/* 焦点相关的定义在文件末尾（键盘那一节），这里先声明 */
+/* ⚠️ Field 的【完整定义】必须在 App 之前 —— App 里有 Field 成员，
+ *    而结构体成员不能是不完整类型。第一版只前置声明了它，编译报的是
+ *    "field has incomplete type"，指向 App 而不是 Field，容易查偏。 */
+/* ⚠️ Field 的【完整定义】必须在 App 之前 —— App 里有 Field 成员，而结构体
+ *    成员不能是不完整类型。只前置声明的话，编译报的是 App 那几行
+ *    "field has incomplete type"，指向 App 而不是 Field，很容易查偏。 */
+struct Field { char buf[128]; int len; bool secret; };
 typedef struct Field Field;
 static void focus_ring(cairo_t *cr);
 static Field *g_field_focused;   /* 当前有焦点的输入框；没有就是 NULL */
+static void field_draw(cairo_t *cr, double x, double y, double w, double h,
+                       Field *f, int id, const char *placeholder);
+static void field_key(Field *f, unsigned code, bool shift);
 static void hit_add(double x, double y, double w, double h, int id, bool en)
 {
     if (g_nhits < MAX_HITS) g_hits[g_nhits++] = (Hit){x, y, w, h, id, en};
@@ -246,11 +255,27 @@ static void gk3_strings_init(void)
 }
 
 /* ── 应用状态 ──────────────────────────────────────────────────────────── */
-typedef enum { SC_WELCOME, SC_DISK, SC_MODE, SC_OPTS, SC_CONFIRM, SC_RUN, SC_DONE } Screen;
+/* ⚠️ 顺序 = 向导顺序。ID_BACK 是 screen-- ，所以插新屏时要想清楚它的前一屏。
+ *    SC_SHRINK / SC_NET / SC_VARIANT 是【分支】，不在主线上 —— 它们的返回
+ *    目标另记在 a->back_to，不能简单 screen--。 */
+typedef enum {
+    SC_WELCOME, SC_DISK, SC_MODE,
+    SC_SHRINK,          /* 分支：缩分区 */
+    SC_SOURCE,          /* 镜像来源：U 盘 / 网络 */
+    SC_NET,             /* 分支：连 WiFi */
+    SC_VARIANT,         /* 分支：选版本 */
+    SC_OPTS, SC_ADV, SC_CONFIRM, SC_RUN, SC_DONE
+} Screen;
 
 typedef struct { char path[64]; long size_mib; char model[64]; int removable; } Disk;
 typedef struct { char path[64]; long start, end, size_mib; char name[40], fs[16], os[16]; } Part;
 typedef struct { char disk[64]; long start, end, size_mib; } FreeRgn;
+/* 可缩的分区 */
+typedef struct { char path[64], fs[16], why[32]; long cur_mib, min_mib; bool can; } Shrinkable;
+/* 扫到的无线网络 */
+typedef struct { char ssid[72]; int signal; bool secure; } Ap;
+/* 可下载的版本 */
+typedef struct { char id[32], name[64], desc[160], url[256], sha[72]; long size_mib; } Variant;
 
 #define MAXD 8
 #define MAXP 64
@@ -270,13 +295,43 @@ typedef struct {
     char    logtail[6][160]; int nlog;
     bool    failed;
     double  hold;               /* 确认页"按住"进度 0..1 */
+
+    Screen  back_to;            /* 分支屏返回到哪一屏 */
+    int     pending;            /* 待执行的长耗时动作，见 ACT_* */
+
+    /* 缩分区 */
+    Shrinkable shr[8]; int nshr; int selshr;
+    Field   shr_size;           /* 目标大小，GiB */
+    char    shr_msg[200];
+
+    /* 网络 */
+    Ap      aps[24]; int naps; int selap;
+    Field   wifi_pw;
+    bool    net_online, net_busy;
+    char    net_ip[40], net_ssid[72], net_msg[200];
+
+    /* 来源与版本 */
+    bool    src_net;            /* false=U 盘  true=网络 */
+    bool    usb_has_payload;
+    Variant vars[8]; int nvars; int selvar;
+    char    var_msg[200];
+
+    /* 专业分区：可编辑的三个（super / 救援 / userdata），单位 MiB */
+    bool    adv_on;
+    Field   adv_super, adv_rescue, adv_data;
+    char    adv_msg[200];
 } App;
 
 enum {
     ID_NONE = -1,
     ID_START = 1, ID_QUIT, ID_BACK, ID_NEXT,
-    ID_MODE_WIPE, ID_MODE_ALONG, ID_RESCUE_TOGGLE, ID_CONFIRM_HOLD, ID_REBOOT,
-    ID_DISK0 = 100, ID_FREE0 = 200
+    ID_MODE_WIPE, ID_MODE_ALONG, ID_MODE_SHRINK, ID_RESCUE_TOGGLE,
+    ID_CONFIRM_HOLD, ID_REBOOT, ID_SHELL,
+    ID_SHRINK_SIZE, ID_SHRINK_GO,
+    ID_SRC_USB, ID_SRC_NET,
+    ID_NET_PW, ID_NET_CONNECT, ID_NET_RESCAN,
+    ID_ADV_TOGGLE, ID_ADV_SUPER, ID_ADV_RESCUE, ID_ADV_DATA, ID_ADV_RESET,
+    ID_DISK0 = 100, ID_SHR0 = 200, ID_AP0 = 300, ID_VAR0 = 400
 };
 
 /* 焦点状态。定义放在这里而不是键盘那一节 —— 因为 run_png() 和
@@ -324,6 +379,7 @@ static void sc_welcome(cairo_t *cr, App *a)
          S_WELCOME_NOTE);
     button(cr, 64, UI_H - 140, 300, 88, S_BTN_START, ID_START, true, true, false);
     button(cr, 388, UI_H - 140, 240, 88, S_BTN_QUIT, ID_QUIT, false, true, false);
+    button(cr, 652, UI_H - 140, 220, 88, S_SHELL_OPEN, ID_SHELL, false, true, false);
 }
 
 static void sc_disk(cairo_t *cr, App *a)
@@ -382,6 +438,13 @@ static void sc_mode(cairo_t *cr, App *a)
     }
     hit_add(x2, 180, (UI_W - 160) / 2, 300, ID_MODE_ALONG, can_along);
 
+    /* ★ 第三条路：缩分区。一直显示（不是"空间不够才冒出来"）——
+     *   用户需要知道这条路存在，否则他会以为只能二选一。 */
+    card(cr, 64, 500, UI_W - 128, 104, false, a->nparts > 0);
+    text(cr, 96, 518, 700, 20, C_TEXT, "left", S_MODE_SHRINK_TITLE);
+    text(cr, 96, 552, UI_W - 220, 15, C_MUTED, "left", S_MODE_SHRINK_BODY);
+    hit_add(64, 500, UI_W - 128, 104, ID_MODE_SHRINK, a->nparts > 0);
+
     button(cr, 64, UI_H - 140, 200, 88, S_BTN_BACK, ID_BACK, false, true, false);
     button(cr, UI_W - 364, UI_H - 140, 300, 88, S_BTN_NEXT, ID_NEXT, true, true, false);
 }
@@ -408,7 +471,21 @@ static void sc_opts(cairo_t *cr, App *a)
     if (a->plan_err[0])
         text(cr, 64, 390, UI_W - 128, 17, C_DANGER, "left", "%s", a->plan_err);
 
+    /* 专业分区开关 */
+    card(cr, 64, 430, UI_W - 128, 96, false, true);
+    text(cr, 96, 452, 700, 19, C_TEXT, "left", S_ADV_TITLE);
+    text(cr, 96, 484, 760, 14, C_MUTED, "left", S_ADV_SUB);
+    {
+        double sx = UI_W - 210, sy = 448;
+        rrect(cr, sx, sy, 120, 56, 28);
+        set_col(cr, a->adv_on ? C_ACCENT : C_SURF2); cairo_fill(cr);
+        cairo_arc(cr, a->adv_on ? sx + 92 : sx + 28, sy + 28, 22, 0, 2 * M_PI);
+        set_col(cr, (Col){1,1,1,1}); cairo_fill(cr);
+        hit_add(sx - 20, sy - 20, 160, 96, ID_ADV_TOGGLE, true);
+    }
+
     button(cr, 64, UI_H - 140, 200, 88, S_BTN_BACK, ID_BACK, false, true, false);
+    button(cr, 288, UI_H - 140, 220, 88, S_SHELL_OPEN, ID_SHELL, false, true, false);
     button(cr, UI_W - 364, UI_H - 140, 300, 88, S_BTN_NEXT, ID_NEXT, true, !a->plan_err[0], false);
 }
 
@@ -492,6 +569,193 @@ static void sc_done(cairo_t *cr, App *a)
     }
 }
 
+/* ── 缩分区（分支屏）───────────────────────────────────────────────────────
+ *
+ * ⚠️ 单独一屏、单独一次确认。**不要**把它混进"选择安装方式"里顺手做掉 ——
+ *    这是整个安装过程中唯一会改动用户现有数据的一步，它值得用户停一下。
+ */
+static void sc_shrink(cairo_t *cr, App *a)
+{
+    draw_chrome(cr, S_SHRINK_TITLE, S_SHRINK_SUB);
+    char b1[32], b2[32], b3[32];
+    double y = 176;
+
+    if (a->nshr == 0)
+        text(cr, 64, y, UI_W - 128, 17, C_MUTED, "left", S_SHRINK_NONE);
+
+    for (int i = 0; i < a->nshr && i < 4; i++) {
+        Shrinkable *p = &a->shr[i];
+        bool sel = (a->selshr == i);
+        card(cr, 64, y, UI_W - 128, 84, sel, p->can);
+        text(cr, 96, y + 12, 700, 19, p->can ? C_TEXT : C_MUTED, "left", "%s", p->path);
+        if (p->can) {
+            text(cr, 96, y + 46, 900, 14, C_MUTED, "left", S_SHRINK_ROW,
+                 p->fs, human(p->cur_mib, b1, sizeof b1), human(p->min_mib, b2, sizeof b2));
+        } else {
+            const char *why = S_SHRINK_WHY_FS;
+            if (!strcmp(p->why, "ntfs-dirty")) why = S_SHRINK_WHY_DIRTY;
+            text(cr, 96, y + 46, UI_W - 220, 14, C_DANGER, "left", "%s", why);
+        }
+        hit_add(64, y, UI_W - 128, 84, ID_SHR0 + i, p->can);
+        y += 96;
+    }
+
+    if (a->selshr >= 0 && a->selshr < a->nshr && a->shr[a->selshr].can) {
+        Shrinkable *p = &a->shr[a->selshr];
+        text(cr, 64, y + 12, 420, 15, C_MUTED, "left", S_SHRINK_SIZE_HINT);
+        field_draw(cr, 64, y + 38, 300, 72, &a->shr_size, ID_SHRINK_SIZE, "");
+        long want_mib = atol(a->shr_size.buf) * 1024;
+        if (want_mib > 0 && want_mib < p->cur_mib)
+            text(cr, 388, y + 58, 600, 16, C_OK, "left", S_SHRINK_FREED,
+                 human(p->cur_mib - want_mib, b3, sizeof b3));
+        text(cr, 64, y + 128, UI_W - 128, 15, C_DANGER, "left", S_SHRINK_WARN);
+    }
+    if (a->shr_msg[0])
+        text(cr, 64, UI_H - 200, UI_W - 128, 15, C_DANGER, "left", "%s", a->shr_msg);
+
+    button(cr, 64, UI_H - 140, 200, 88, S_BTN_BACK, ID_BACK, false, true, false);
+    bool ready = (a->selshr >= 0 && a->selshr < a->nshr && a->shr[a->selshr].can
+                  && atol(a->shr_size.buf) > 0);
+    button(cr, UI_W - 364, UI_H - 140, 300, 88, S_SHRINK_GO, ID_SHRINK_GO, true, ready, true);
+}
+
+/* ── 镜像来源 ─────────────────────────────────────────────────────────────── */
+static void sc_source(cairo_t *cr, App *a)
+{
+    draw_chrome(cr, S_SOURCE_TITLE, S_SOURCE_SUB);
+    double w = (UI_W - 160) / 2;
+
+    card(cr, 64, 180, w, 260, !a->src_net, a->usb_has_payload);
+    text(cr, 96, 208, w - 64, 24,
+         a->usb_has_payload ? C_TEXT : C_MUTED, "left", S_SOURCE_USB_TITLE);
+    text(cr, 96, 256, w - 64, 16, C_MUTED, "left",
+         a->usb_has_payload ? S_SOURCE_USB_BODY : S_SOURCE_USB_MISSING);
+    hit_add(64, 180, w, 260, ID_SRC_USB, a->usb_has_payload);
+
+    double x2 = 64 + w + 32;
+    card(cr, x2, 180, w, 260, a->src_net, true);
+    text(cr, x2 + 32, 208, w - 64, 24, C_TEXT, "left", S_SOURCE_NET_TITLE);
+    text(cr, x2 + 32, 256, w - 64, 15, C_MUTED, "left", S_SOURCE_NET_BODY);
+    if (a->net_online)
+        text(cr, x2 + 32, 380, w - 64, 15, C_OK, "left", S_NET_CONNECTED,
+             a->net_ssid, a->net_ip);
+    hit_add(x2, 180, w, 260, ID_SRC_NET, true);
+
+    button(cr, 64, UI_H - 140, 200, 88, S_BTN_BACK, ID_BACK, false, true, false);
+    button(cr, UI_W - 364, UI_H - 140, 300, 88, S_BTN_NEXT, ID_NEXT, true,
+           a->src_net || a->usb_has_payload, false);
+}
+
+/* ── 连 WiFi（分支屏）──────────────────────────────────────────────────────
+ * ⚠️ 密码错的表现是反复重连而不是明确报错（wpa_supplicant 就是这样），
+ *    所以失败文案里必须把"可能是密码错"说出来 —— 否则用户会以为是信号问题。
+ */
+static void sc_net(cairo_t *cr, App *a)
+{
+    draw_chrome(cr, S_NET_TITLE, S_NET_SUB);
+    double y = 176;
+
+    if (a->net_busy)
+        text(cr, 64, y, UI_W - 128, 19, C_MUTED, "left", S_NET_SCANNING);
+    else if (a->naps == 0)
+        text(cr, 64, y, UI_W - 128, 17, C_MUTED, "left", S_NET_NONE);
+
+    for (int i = 0; i < a->naps && i < 5; i++) {
+        Ap *ap = &a->aps[i];
+        bool sel = (a->selap == i);
+        card(cr, 64, y, UI_W - 128, 68, sel, true);
+        text(cr, 96, y + 20, 700, 18, C_TEXT, "left", "%s", ap->ssid);
+        text(cr, UI_W - 300, y + 22, 204, 15, C_MUTED, "right", "%d dBm%s",
+             ap->signal, ap->secure ? " · 加密" : "");
+        hit_add(64, y, UI_W - 128, 68, ID_AP0 + i, true);
+        y += 80;
+    }
+
+    if (a->selap >= 0 && a->selap < a->naps && a->aps[a->selap].secure) {
+        a->wifi_pw.secret = true;
+        text(cr, 64, y + 10, 400, 15, C_MUTED, "left", S_NET_PASSWORD);
+        field_draw(cr, 64, y + 36, UI_W - 460, 72, &a->wifi_pw, ID_NET_PW, "");
+    }
+    if (a->net_msg[0])
+        text(cr, 64, UI_H - 210, UI_W - 128, 15,
+             a->net_online ? C_OK : C_DANGER, "left", "%s", a->net_msg);
+
+    button(cr, 64, UI_H - 140, 200, 88, S_BTN_BACK, ID_BACK, false, true, false);
+    button(cr, 288, UI_H - 140, 220, 88, S_NET_RESCAN, ID_NET_RESCAN, false, !a->net_busy, false);
+    button(cr, UI_W - 364, UI_H - 140, 300, 88, S_NET_CONNECT, ID_NET_CONNECT, true,
+           a->selap >= 0 && !a->net_busy, false);
+}
+
+/* ── 选版本（分支屏）─────────────────────────────────────────────────────── */
+static void sc_variant(cairo_t *cr, App *a)
+{
+    draw_chrome(cr, S_VARIANT_TITLE, S_VARIANT_SUB);
+    char b1[32];
+    double y = 176;
+    if (a->nvars == 0)
+        text(cr, 64, y, UI_W - 128, 17, C_DANGER, "left", "%s",
+             a->var_msg[0] ? a->var_msg : S_VARIANT_FAILED);
+    for (int i = 0; i < a->nvars && i < 4; i++) {
+        Variant *v = &a->vars[i];
+        bool sel = (a->selvar == i);
+        card(cr, 64, y, UI_W - 128, 100, sel, true);
+        text(cr, 96, y + 14, 800, 20, C_TEXT, "left", "%s", v->name);
+        text(cr, 96, y + 48, UI_W - 400, 14, C_MUTED, "left", "%s", v->desc);
+        text(cr, UI_W - 300, y + 40, 204, 15, sel ? C_ACCENT : C_MUTED, "right",
+             S_VARIANT_SIZE, human(v->size_mib, b1, sizeof b1));
+        hit_add(64, y, UI_W - 128, 100, ID_VAR0 + i, true);
+        y += 112;
+    }
+    button(cr, 64, UI_H - 140, 200, 88, S_BTN_BACK, ID_BACK, false, true, false);
+    button(cr, UI_W - 364, UI_H - 140, 300, 88, S_BTN_NEXT, ID_NEXT, true, a->selvar >= 0, false);
+}
+
+/* ── 专业分区大小 ─────────────────────────────────────────────────────────
+ * ⚠️ 只放开三个可改：super / 救援 / userdata。esp、misc、metadata、boot_a/b
+ *    的大小是 Android 那边定死的，改了会起不来 —— 放开它们不是"专业"，是陷阱。
+ */
+static void sc_adv(cairo_t *cr, App *a)
+{
+    draw_chrome(cr, S_ADV_TITLE, S_ADV_SUB);
+    char b1[32], b2[32];
+    static const char *names[7] = { "esp", "misc", "metadata", "boot_a + boot_b",
+                                    "super", "gk3rescue", "userdata" };
+    static const long fixed_mib[7] = { 300, 4, 32, 128, 0, 0, 0 };
+    Field *flds[7] = { NULL, NULL, NULL, NULL, &a->adv_super, &a->adv_rescue, &a->adv_data };
+    int ids[7]     = { 0, 0, 0, 0, ID_ADV_SUPER, ID_ADV_RESCUE, ID_ADV_DATA };
+
+    double y = 176;
+    long used = 0;
+    for (int i = 0; i < 7; i++) {
+        text(cr, 80, y + 20, 300, 18, flds[i] ? C_TEXT : C_MUTED, "left", "%s", names[i]);
+        if (flds[i]) {
+            field_draw(cr, 380, y, 200, 56, flds[i], ids[i], "MiB");
+            used += atol(flds[i]->buf);
+        } else {
+            text(cr, 380, y + 20, 200, 16, C_MUTED, "left", "%s",
+                 human(fixed_mib[i], b1, sizeof b1));
+            used += fixed_mib[i];
+        }
+        y += 66;
+    }
+
+    long avail = a->plan_userdata_mib > 0
+               ? a->plan_userdata_mib + 13776   /* 固定开销加回去 = 总可用 */
+               : 0;
+    bool over = (avail > 0 && used > avail);
+    text(cr, 640, 200, 520, 16, over ? C_DANGER : C_MUTED, "left",
+         S_ADV_TOTAL, human(used, b1, sizeof b1), human(avail, b2, sizeof b2));
+    if (over)
+        text(cr, 640, 240, 520, 15, C_DANGER, "left", S_ADV_OVERFLOW);
+    if (a->adv_msg[0])
+        text(cr, 640, 280, 520, 15, C_DANGER, "left", "%s", a->adv_msg);
+
+    button(cr, 640, 340, 220, 72, S_ADV_RESET, ID_ADV_RESET, false, true, false);
+    button(cr, 64, UI_H - 140, 200, 88, S_BTN_BACK, ID_BACK, false, true, false);
+    button(cr, UI_W - 364, UI_H - 140, 300, 88, S_BTN_NEXT, ID_NEXT, true, !over, false);
+}
+
+
 static void draw(cairo_t *cr, App *a)
 {
     hit_reset();
@@ -499,6 +763,11 @@ static void draw(cairo_t *cr, App *a)
         case SC_WELCOME: sc_welcome(cr, a); break;
         case SC_DISK:    sc_disk(cr, a);    break;
         case SC_MODE:    sc_mode(cr, a);    break;
+        case SC_SHRINK:  sc_shrink(cr, a);  break;
+        case SC_SOURCE:  sc_source(cr, a);  break;
+        case SC_NET:     sc_net(cr, a);     break;
+        case SC_VARIANT: sc_variant(cr, a); break;
+        case SC_ADV:     sc_adv(cr, a);     break;
         case SC_OPTS:    sc_opts(cr, a);    break;
         case SC_CONFIRM: sc_confirm(cr, a); break;
         case SC_RUN:     sc_run(cr, a);     break;
@@ -629,6 +898,173 @@ static void recompute_plan(App *a)
     backend(call, on_plan, a);
 }
 
+/* ── 后端结果的解析 ──────────────────────────────────────────────────────── */
+static void on_shrink(const char *line, void *ud)
+{
+    App *a = ud;
+    if (strncmp(line, "SHRINK ", 7)) return;
+    if (a->nshr >= 8) return;
+    Shrinkable *p = &a->shr[a->nshr];
+    memset(p, 0, sizeof *p);
+    kv(line, "part", p->path, sizeof p->path);
+    kv(line, "fs",   p->fs,   sizeof p->fs);
+    kv(line, "why",  p->why,  sizeof p->why);
+    p->cur_mib = kvl(line, "cur_mib");
+    p->min_mib = kvl(line, "min_mib");
+    char c[8]; p->can = (kv(line, "can", c, sizeof c) && !strcmp(c, "yes"));
+    a->nshr++;
+}
+
+static void on_wifi(const char *line, void *ud)
+{
+    App *a = ud;
+    if (strncmp(line, "WIFI ", 5)) return;
+    if (a->naps >= 24) return;
+    Ap *ap = &a->aps[a->naps];
+    memset(ap, 0, sizeof *ap);
+    ap->signal = (int)kvl(line, "signal");
+    char sec[8]; ap->secure = (kv(line, "secure", sec, sizeof sec) && !strcmp(sec, "yes"));
+    /* ⚠️ SSID 里可能有空格，所以后端把它放在行尾 —— 这里取 "ssid=" 之后的全部，
+     *    不能用 kv()（它遇到空格就停）。 */
+    const char *p = strstr(line, "ssid=");
+    if (p) snprintf(ap->ssid, sizeof ap->ssid, "%s", p + 5);
+    if (ap->ssid[0]) a->naps++;
+}
+
+static void on_net(const char *line, void *ud)
+{
+    App *a = ud;
+    if (strncmp(line, "NET ", 4)) return;
+    kv(line, "ip",   a->net_ip,   sizeof a->net_ip);
+    kv(line, "ssid", a->net_ssid, sizeof a->net_ssid);
+    char on[8]; a->net_online = (kv(line, "online", on, sizeof on) && !strcmp(on, "yes"));
+}
+
+static void on_variant(const char *line, void *ud)
+{
+    App *a = ud;
+    if (strncmp(line, "VARIANT ", 8)) return;
+    if (a->nvars >= 8) return;
+    Variant *v = &a->vars[a->nvars];
+    memset(v, 0, sizeof *v);
+    kv(line, "id",   v->id,   sizeof v->id);
+    kv(line, "name", v->name, sizeof v->name);
+    kv(line, "desc", v->desc, sizeof v->desc);
+    kv(line, "url",  v->url,  sizeof v->url);
+    kv(line, "sha256", v->sha, sizeof v->sha);
+    v->size_mib = kvl(line, "size_mib");
+    if (v->id[0] && v->url[0]) a->nvars++;
+}
+
+/* ── 长耗时动作 ──────────────────────────────────────────────────────────
+ *
+ * ⚠️ 这些会阻塞好几秒到几十秒（扫描 3s、连接 20s、缩分区好几分钟）。
+ *    on_tap() 是在事件循环里调用的，直接在那里跑会让界面【僵在按下前的样子】——
+ *    用户以为没点上，于是再点一次。
+ *    所以 on_tap 只【记下要做什么】，由主循环先重绘一帧再执行。
+ */
+enum { ACT_NONE = 0, ACT_WIFI_SCAN, ACT_WIFI_CONNECT, ACT_VARIANTS, ACT_SHRINK, ACT_SHRINK_SCAN };
+
+static void do_pending(App *a, int act)
+{
+    char call[512];
+    switch (act) {
+        case ACT_SHRINK_SCAN: {
+            a->nshr = 0; a->selshr = -1;
+            /* 只问这块盘上的分区 */
+            for (int i = 0; i < a->nparts; i++) {
+                if (a->seldisk < 0) break;
+                if (strncmp(a->parts[i].path, a->disks[a->seldisk].path,
+                            strlen(a->disks[a->seldisk].path))) continue;
+                snprintf(call, sizeof call, "gk3_shrink_info %s", a->parts[i].path);
+                backend(call, on_shrink, a);
+            }
+            break;
+        }
+        case ACT_WIFI_SCAN:
+            a->naps = 0; a->selap = -1;
+            backend("gk3_wifi_scan", on_wifi, a);
+            a->net_busy = false;
+            if (a->naps == 0) snprintf(a->net_msg, sizeof a->net_msg, "%s", S_NET_NONE);
+            break;
+        case ACT_WIFI_CONNECT: {
+            if (a->selap < 0 || a->selap >= a->naps) break;
+            /* ⚠️ 密码里可能有单引号，用双引号包不安全。这里做最朴素的转义：
+             *    把单引号换成 '"'"' 。安装器里执行任意命令的风险必须堵死。 */
+            char pw[256]; int k = 0;
+            for (int i = 0; a->wifi_pw.buf[i] && k < (int)sizeof pw - 8; i++) {
+                if (a->wifi_pw.buf[i] == '\'') {
+                    memcpy(pw + k, "'\"'\"'", 5); k += 5;
+                } else pw[k++] = a->wifi_pw.buf[i];
+            }
+            pw[k] = 0;
+            snprintf(call, sizeof call, "gk3_wifi_connect '%s' '%s' 2>&1",
+                     a->aps[a->selap].ssid, pw);
+            a->net_online = false;
+            backend(call, on_net, a);
+            a->net_busy = false;
+            snprintf(a->net_msg, sizeof a->net_msg, "%s",
+                     a->net_online ? "" : S_NET_FAILED);
+            if (a->net_online) {
+                char tmp[200];
+                snprintf(tmp, sizeof tmp, S_NET_CONNECTED, a->net_ssid, a->net_ip);
+                snprintf(a->net_msg, sizeof a->net_msg, "%s", tmp);
+            }
+            break;
+        }
+        case ACT_VARIANTS:
+            a->nvars = 0; a->selvar = -1; a->var_msg[0] = 0;
+            backend("gk3_net_manifest", on_variant, a);
+            if (a->nvars == 0) snprintf(a->var_msg, sizeof a->var_msg, "%s", S_VARIANT_FAILED);
+            break;
+        case ACT_SHRINK: {
+            if (a->selshr < 0 || a->selshr >= a->nshr) break;
+            long gib = atol(a->shr_size.buf);
+            snprintf(call, sizeof call, "gk3_shrink %s %ld 2>&1",
+                     a->shr[a->selshr].path, gib * 1024);
+            a->shr_msg[0] = 0;
+            int rc = backend(call, NULL, NULL);
+            if (rc != 0) {
+                snprintf(a->shr_msg, sizeof a->shr_msg,
+                         "缩小失败。分区表已备份，你的数据应当完好。");
+            } else {
+                /* 缩完要重新探一次磁盘 —— 空闲区变了 */
+                a->nparts = 0; a->nfrees = 0; a->ndisks = 0; a->esp[0] = 0;
+                backend("gk3_probe", on_probe, a);
+                a->screen = SC_MODE;
+                a->mode_wipe = false;
+                recompute_plan(a);
+            }
+            break;
+        }
+        default: break;
+    }
+}
+
+/* 命令行逃生口。切到 tty2 之前要把 VT 放回文本模式，否则用户面对的是黑屏。
+ * ⚠️ PNG 构建里没有 VT，所以真正的动作由 DRM 后端注册进来（钩子为空就只 chvt）。 */
+static void (*g_vt_text_hook)(void);
+static void vt_text_for_shell(void)
+{
+    if (g_vt_text_hook) g_vt_text_hook();
+    if (system("chvt 2") != 0) { /* 没有 chvt 也不是致命的，用户还能 Ctrl+Alt+F2 */ }
+}
+
+/* 专业分区的默认值。和 installer-lib.sh 里的常量保持一致 ——
+ * ⚠️ 两处写死同一组数字是隐患，但把它们从 shell 里读出来要多一次 backend 调用，
+ *    而这一屏是"专业选项"，用户会自己改。至少把来源写在这里。 */
+static void adv_defaults(App *a)
+{
+    snprintf(a->adv_super.buf,  sizeof a->adv_super.buf,  "12288");
+    snprintf(a->adv_rescue.buf, sizeof a->adv_rescue.buf, "1024");
+    snprintf(a->adv_data.buf,   sizeof a->adv_data.buf,   "%ld",
+             a->plan_userdata_mib > 0 ? a->plan_userdata_mib : 8192L);
+    a->adv_super.len  = (int)strlen(a->adv_super.buf);
+    a->adv_rescue.len = (int)strlen(a->adv_rescue.buf);
+    a->adv_data.len   = (int)strlen(a->adv_data.buf);
+    a->adv_msg[0] = 0;
+}
+
 /* ── 事件 ──────────────────────────────────────────────────────────────── */
 /* 返回 true 表示需要重绘 */
 static bool on_tap(App *a, int id)
@@ -637,19 +1073,65 @@ static bool on_tap(App *a, int id)
         case ID_START:  a->screen = SC_DISK; return true;
         case ID_QUIT:   exit(0);
         case ID_BACK:
-            if (a->screen > SC_WELCOME && a->screen < SC_RUN) a->screen--;
+            /* ⚠️ 分支屏（缩分区 / 连网 / 选版本）不能简单 screen-- ——
+             *    它们是从别处跳进来的，回去的目标记在 back_to。 */
+            if (a->screen == SC_SHRINK || a->screen == SC_NET || a->screen == SC_VARIANT)
+                a->screen = a->back_to;
+            else if (a->screen > SC_WELCOME && a->screen < SC_RUN)
+                a->screen--;
             return true;
+        case ID_SHELL:
+            /* 命令行逃生口：切到 tty2（inittab 在那儿留了 getty）。
+             * ⚠️ 切过去之前要把 VT 放回文本模式，否则用户看到的是一块黑屏。 */
+            vt_text_for_shell();
+            return false;
         case ID_NEXT:
             if (a->screen == SC_DISK && a->seldisk >= 0) { a->screen = SC_MODE; recompute_plan(a); }
-            else if (a->screen == SC_MODE) { a->screen = SC_OPTS; recompute_plan(a); }
-            else if (a->screen == SC_OPTS && !a->plan_err[0]) a->screen = SC_CONFIRM;
+            else if (a->screen == SC_MODE)    { a->screen = SC_SOURCE; recompute_plan(a); }
+            else if (a->screen == SC_SOURCE)  {
+                if (a->src_net) { a->back_to = SC_SOURCE; a->screen = SC_VARIANT;
+                                  a->pending = ACT_VARIANTS; }
+                else a->screen = SC_OPTS;
+            }
+            else if (a->screen == SC_VARIANT && a->selvar >= 0) a->screen = SC_OPTS;
+            else if (a->screen == SC_OPTS && !a->plan_err[0])
+                a->screen = a->adv_on ? SC_ADV : SC_CONFIRM;
+            else if (a->screen == SC_ADV)     a->screen = SC_CONFIRM;
             return true;
         case ID_MODE_WIPE:  a->mode_wipe = true;  recompute_plan(a); return true;
         case ID_MODE_ALONG: a->mode_wipe = false; recompute_plan(a); return true;
+        case ID_MODE_SHRINK:
+            a->back_to = SC_MODE; a->screen = SC_SHRINK;
+            a->pending = ACT_SHRINK_SCAN; return true;
+        case ID_SRC_USB: a->src_net = false; return true;
+        case ID_SRC_NET:
+            a->src_net = true;
+            if (!a->net_online) { a->back_to = SC_SOURCE; a->screen = SC_NET;
+                                  a->net_busy = true; a->pending = ACT_WIFI_SCAN; }
+            return true;
+        case ID_NET_RESCAN:  a->net_busy = true; a->net_msg[0] = 0;
+                             a->pending = ACT_WIFI_SCAN; return true;
+        case ID_NET_CONNECT: a->net_busy = true; a->net_msg[0] = 0;
+                             a->pending = ACT_WIFI_CONNECT; return true;
+        case ID_SHRINK_GO:   a->pending = ACT_SHRINK; return true;
+        case ID_ADV_TOGGLE:  a->adv_on = !a->adv_on; return true;
+        case ID_ADV_RESET:   adv_defaults(a); return true;
         case ID_RESCUE_TOGGLE: a->want_rescue = !a->want_rescue; recompute_plan(a); return true;
         case ID_REBOOT: system("reboot"); return false;
         default:
             if (id >= ID_DISK0 && id < ID_DISK0 + MAXD) { a->seldisk = id - ID_DISK0; return true; }
+            if (id >= ID_SHR0 && id < ID_SHR0 + 8) {
+                a->selshr = id - ID_SHR0;
+                /* 默认填一个安全的目标：当前的一半，但不低于"最小+1 GiB" */
+                Shrinkable *p = &a->shr[a->selshr];
+                long half = p->cur_mib / 2, floor_mib = p->min_mib + 1024;
+                long want = half > floor_mib ? half : floor_mib;
+                snprintf(a->shr_size.buf, sizeof a->shr_size.buf, "%ld", want / 1024);
+                a->shr_size.len = (int)strlen(a->shr_size.buf);
+                return true;
+            }
+            if (id >= ID_AP0  && id < ID_AP0  + 24) { a->selap  = id - ID_AP0;  return true; }
+            if (id >= ID_VAR0 && id < ID_VAR0 + 8)  { a->selvar = id - ID_VAR0; return true; }
             return false;
     }
 }
@@ -743,6 +1225,49 @@ static int run_png(const char *dir)
     g_focus = 1;   /* 第二个控件：右边那张卡片 */
     render_png(&a, dir, "15-keyboard-focus");
     g_kbd_used = false; g_focus = -1;
+
+    /* ── 新增的几屏也离线渲一遍 ── */
+    a.nshr = 3; a.selshr = 0;
+    snprintf(a.shr[0].path, sizeof a.shr[0].path, "/dev/nvme0n1p3");
+    snprintf(a.shr[0].fs, sizeof a.shr[0].fs, "ntfs");
+    a.shr[0].cur_mib = 400000; a.shr[0].min_mib = 92000; a.shr[0].can = true;
+    snprintf(a.shr[1].path, sizeof a.shr[1].path, "/dev/nvme0n1p4");
+    snprintf(a.shr[1].fs, sizeof a.shr[1].fs, "ntfs");
+    snprintf(a.shr[1].why, sizeof a.shr[1].why, "ntfs-dirty");
+    a.shr[1].cur_mib = 1000; a.shr[1].can = false;
+    snprintf(a.shr[2].path, sizeof a.shr[2].path, "/dev/nvme0n1p2");
+    snprintf(a.shr[2].fs, sizeof a.shr[2].fs, "vfat");
+    snprintf(a.shr[2].why, sizeof a.shr[2].why, "fs-not-shrinkable");
+    a.shr[2].cur_mib = 16; a.shr[2].can = false;
+    snprintf(a.shr_size.buf, sizeof a.shr_size.buf, "200");
+    a.shr_size.len = 3;
+    a.screen = SC_SHRINK; render_png(&a, dir, "16-shrink");
+
+    a.usb_has_payload = true; a.src_net = false;
+    a.screen = SC_SOURCE; render_png(&a, dir, "17-source");
+
+    a.naps = 4; a.selap = 0;
+    snprintf(a.aps[0].ssid, sizeof a.aps[0].ssid, "SkipM4_5G"); a.aps[0].signal = -48; a.aps[0].secure = true;
+    snprintf(a.aps[1].ssid, sizeof a.aps[1].ssid, "SkipM4");    a.aps[1].signal = -61; a.aps[1].secure = true;
+    snprintf(a.aps[2].ssid, sizeof a.aps[2].ssid, "CMCC-Free"); a.aps[2].signal = -74; a.aps[2].secure = false;
+    snprintf(a.aps[3].ssid, sizeof a.aps[3].ssid, "邻居家的网"); a.aps[3].signal = -83; a.aps[3].secure = true;
+    snprintf(a.wifi_pw.buf, sizeof a.wifi_pw.buf, "12345678"); a.wifi_pw.len = 8;
+    a.screen = SC_NET; render_png(&a, dir, "18-wifi");
+
+    a.nvars = 3; a.selvar = 1;
+    snprintf(a.vars[0].name, sizeof a.vars[0].name, "标准版");
+    snprintf(a.vars[0].desc, sizeof a.vars[0].desc, "不含 root，不含 Google 服务");
+    a.vars[0].size_mib = 1180;
+    snprintf(a.vars[1].name, sizeof a.vars[1].name, "标准版 + Google 服务");
+    snprintf(a.vars[1].desc, sizeof a.vars[1].desc, "含 Play 商店。首次开机需要联网");
+    a.vars[1].size_mib = 1420;
+    snprintf(a.vars[2].name, sizeof a.vars[2].name, "含 root（ReSukiSU）+ Google 服务");
+    snprintf(a.vars[2].desc, sizeof a.vars[2].desc, "root 会影响 Play Integrity 和部分带反作弊的手游");
+    a.vars[2].size_mib = 1430;
+    a.screen = SC_VARIANT; render_png(&a, dir, "19-variant");
+
+    adv_defaults(&a);
+    a.screen = SC_ADV; render_png(&a, dir, "20-advanced");
     return 0;
 }
 
@@ -813,7 +1338,6 @@ static char key_to_char(unsigned code, bool shift)
 }
 
 /* 一个能输字的框。焦点在它上面时，字符会进 buf。 */
-struct Field { char buf[128]; int len; bool secret; };
 
 static void field_draw(cairo_t *cr, double x, double y, double w, double h,
                        Field *f, int id, const char *placeholder)

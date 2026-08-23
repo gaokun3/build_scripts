@@ -756,3 +756,145 @@ gk3_shrink() {
     gk3_prog 100 "缩小完成"
     return 0
 }
+
+# ── 网络 ────────────────────────────────────────────────────────────────────
+#
+# ⚠️ 这台机器【只有 WiFi】。所以"配网"不是可选步骤 —— 网络安装、下载变体、
+#    甚至装完之后的远程救援，全都压在这一条链上。
+#
+# 走 wpa_supplicant 的控制接口（wpa_cli），不自己解析 iw scan：
+# 连接状态、密码错、DHCP 有没有拿到地址，wpa_supplicant 都已经知道了，
+# 自己再实现一遍只会实现出一个不一致的版本。
+
+GK3_WIFI_IF=${GK3_WIFI_IF:-wlan0}
+GK3_WPA_CTRL=/run/wpa_supplicant
+
+# 确保 wlan0 起来、wpa_supplicant 在跑且带控制接口。
+gk3_wifi_up() {
+    local ifc=$GK3_WIFI_IF
+    if [ ! -e "/sys/class/net/$ifc" ]; then
+        gk3_die "没有 $ifc —— ath11k 没起来（看 dmesg | grep ath11k）"; return 1
+    fi
+    ip link set "$ifc" up 2>/dev/null
+    if wpa_cli -i "$ifc" -p "$GK3_WPA_CTRL" status >/dev/null 2>&1; then
+        return 0    # 已经在跑
+    fi
+    # 起一个只带控制接口的实例，网络等下用 wpa_cli 加
+    local cfg=/tmp/gk3-wpa.conf
+    printf 'ctrl_interface=%s\nupdate_config=1\n' "$GK3_WPA_CTRL" > "$cfg"
+    wpa_supplicant -B -i "$ifc" -c "$cfg" >/dev/null 2>&1
+    local i=0
+    while ! wpa_cli -i "$ifc" -p "$GK3_WPA_CTRL" status >/dev/null 2>&1; do
+        i=$((i+1)); [ "$i" -gt 20 ] && { gk3_die "wpa_supplicant 起不来"; return 1; }
+        sleep 0.5
+    done
+}
+
+# 扫描。输出：WIFI ssid=... signal=<dBm> secure=yes|no
+# ⚠️ SSID 里可能有空格，所以它放在【行尾】，解析时取 ssid= 之后的全部。
+gk3_wifi_scan() {
+    gk3_wifi_up || return 1
+    local ifc=$GK3_WIFI_IF
+    wpa_cli -i "$ifc" -p "$GK3_WPA_CTRL" scan >/dev/null 2>&1
+    sleep 3
+    wpa_cli -i "$ifc" -p "$GK3_WPA_CTRL" scan_results 2>/dev/null \
+    | awk 'NR>1 && NF>=5 {
+        sig=$3; flags=$4;
+        ssid=""; for(i=5;i<=NF;i++) ssid=ssid (i>5?" ":"") $i;
+        if (ssid == "") next;
+        sec = (flags ~ /WPA|WEP/) ? "yes" : "no";
+        # 同名的只留信号最强的那个（2.4G/5G 双频会出现两条）
+        if (!(ssid in best) || sig > best[ssid]) { best[ssid]=sig; secure[ssid]=sec }
+      }
+      END { for (s in best) printf "WIFI signal=%s secure=%s ssid=%s\n", best[s], secure[s], s }' \
+    | sort -t= -k2 -rn
+}
+
+# 连接。$1=SSID $2=密码（空 = 开放网络）
+gk3_wifi_connect() {
+    local ssid=$1 psk=${2:-}
+    gk3_wifi_up || return 1
+    local ifc=$GK3_WIFI_IF W
+    W="wpa_cli -i $ifc -p $GK3_WPA_CTRL"
+    local id
+    id=$($W add_network 2>/dev/null | tail -1)
+    case "$id" in ''|*[!0-9]*) gk3_die "add_network 失败"; return 1 ;; esac
+    $W set_network "$id" ssid "\"$ssid\"" >/dev/null 2>&1
+    if [ -n "$psk" ]; then
+        $W set_network "$id" psk "\"$psk\"" >/dev/null 2>&1
+    else
+        $W set_network "$id" key_mgmt NONE >/dev/null 2>&1
+    fi
+    $W enable_network "$id" >/dev/null 2>&1
+    $W select_network "$id" >/dev/null 2>&1
+
+    gk3_prog 20 "正在连接 $ssid"
+    local i=0 st
+    while [ "$i" -lt 40 ]; do
+        st=$($W status 2>/dev/null | sed -n 's/^wpa_state=//p')
+        case "$st" in
+            COMPLETED) break ;;
+            # ⚠️ 密码错的表现是反复回到 SCANNING/DISCONNECTED，不会有明确报错。
+            #    所以只能靠超时判断 —— 这一点要在界面上说清楚。
+            *) : ;;
+        esac
+        i=$((i+1)); sleep 0.5
+    done
+    [ "$st" = COMPLETED ] || { gk3_die "连不上 $ssid（密码错？信号弱？）"; return 1; }
+
+    gk3_prog 60 "取 IP 地址"
+    dhcpcd -n "$ifc" >/dev/null 2>&1 || dhcpcd "$ifc" >/dev/null 2>&1
+    i=0
+    while [ "$i" -lt 30 ]; do
+        ip -4 addr show "$ifc" 2>/dev/null | grep -q 'inet ' && break
+        i=$((i+1)); sleep 0.5
+    done
+    ip -4 addr show "$ifc" 2>/dev/null | grep -q 'inet ' \
+        || { gk3_die "连上了但没拿到 IP（DHCP 没响应？）"; return 1; }
+    gk3_prog 100 "已连接"
+    gk3_net_status
+}
+
+gk3_net_status() {
+    local ifc=$GK3_WIFI_IF ip4 ssid
+    ip4=$(ip -4 addr show "$ifc" 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1)
+    ssid=$(wpa_cli -i "$ifc" -p "$GK3_WPA_CTRL" status 2>/dev/null | sed -n 's/^ssid=//p')
+    echo "NET if=$ifc ip=${ip4:-none} ssid=${ssid:-none} online=$([ -n "$ip4" ] && echo yes || echo no)"
+}
+
+# ── 网络安装 ────────────────────────────────────────────────────────────────
+#
+# ⚠️ 变体是【构建期】决定的：KSU 要编进内核、GApps 要进 super。
+#    安装器只是"挑一个已经构建好的镜像下载"，不是在设备上组装。
+#    清单托管在 R2（和 OTA 用同一套布局）。
+#
+# 清单格式（一行一个变体，key=value）：
+#   VARIANT id=stock name=标准版 desc=... url=... size_mib=... sha256=...
+
+GK3_MANIFEST_URL=${GK3_MANIFEST_URL:-https://ota.072172.xyz/installer/variants.txt}
+
+gk3_net_manifest() {
+    local url=${1:-$GK3_MANIFEST_URL}
+    command -v curl >/dev/null || { gk3_die "没有 curl"; return 1; }
+    local out
+    out=$(curl -fsSL --max-time 30 "$url" 2>/dev/null) || { gk3_die "取不到清单：$url"; return 1; }
+    printf '%s\n' "$out" | grep '^VARIANT ' || { gk3_die "清单里一个 VARIANT 都没有"; return 1; }
+}
+
+# 下载并校验。$1=url $2=目标文件 $3=期望 sha256（可空）
+gk3_net_fetch() {
+    local url=$1 dst=$2 want=${3:-}
+    gk3_prog 0 "开始下载"
+    # ⚠️ 用 --continue-at 支持断点续传：这台机器的 WAN 只有 1–2 MB/s，
+    #    1.2 GB 要十几分钟，中途断一次全部重来是不可接受的。
+    curl -fL --retry 3 --retry-delay 2 --continue-at - -o "$dst" "$url" 2>&1 \
+        | tr '\r' '\n' | awk '/^ *[0-9]/{ if ($1+0 > 0) printf "PROGRESS %d 下载中 %s\n", $1, $1"%" }' >&2
+    [ -f "$dst" ] || { gk3_die "下载失败"; return 1; }
+    if [ -n "$want" ]; then
+        gk3_prog 95 "校验 sha256"
+        local got; got=$(sha256sum "$dst" | cut -d' ' -f1)
+        [ "$got" = "$want" ] || { gk3_die "sha256 不符：$got != $want"; return 1; }
+        echo "sha256 校验通过"
+    fi
+    gk3_prog 100 "下载完成"
+}

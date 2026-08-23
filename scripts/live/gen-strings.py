@@ -33,6 +33,11 @@ EXPECT = {
     "ERR.NOSPACE":        ["%ld", "%ld"],
     "ERR.PLAN":           ["%s"],
     "ERR.EXIT":           ["%d"],
+    "SHRINK.ROW":         ["%s", "%s", "%s"],
+    "SHRINK.FREED":       ["%s"],
+    "NET.CONNECTED":      ["%s", "%s"],
+    "VARIANT.SIZE":       ["%s"],
+    "ADV.TOTAL":          ["%s", "%s"],
 }
 
 def main():
@@ -74,7 +79,12 @@ def main():
     out.append("/* 内置文案（中文）。gk3_strings_load() 可以整表替换。 */")
     out.append("static const char *gk3_str_default[STR__COUNT] = {")
     for k, v in items:
-        out.append("    " + chr(34) + v + chr(34) + ",")
+        # ⚠️★ 必须转义反斜杠和双引号，否则文案里一个直角引号就能截断
+        #    C 字符串字面量，报的错还落在生成的头文件里（"expected } before ..."），
+        #    完全指不到"是文案里有个引号"。实测踩过。
+        #    注意顺序：先转反斜杠，再转引号。反了会把刚加的反斜杠又转一遍。
+        esc = v.replace(chr(92), chr(92) + chr(92)).replace(chr(34), chr(92) + chr(34))
+        out.append("    " + chr(34) + esc + chr(34) + ",")
     out.append("};")
     out.append("")
     out.append("/* ID 名字，给加载器按名字对号入座用 */")

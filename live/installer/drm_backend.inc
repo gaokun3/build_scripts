@@ -244,14 +244,27 @@ static int run_drm(void)
     App a;
     memset(&a, 0, sizeof a);
     a.seldisk = -1; a.selfree = -1; a.mode_wipe = true; a.want_rescue = true;
+    g_vt_text_hook = vt_graphics_off;   /* 逃生口切 tty2 前先回文本模式 */
     backend("gk3_probe", on_probe, &a);
     if (a.ndisks == 1) a.seldisk = 0;   /* 只有一块盘就直接选中 */
+    /* U 盘里有没有带镜像 —— 决定"来源"那一屏能不能选 U 盘 */
+    a.usb_has_payload = (access("/media/gk3/gaokun3/payload/super.img", R_OK) == 0);
+    backend("gk3_net_status", on_net, &a);
+    adv_defaults(&a);
 
     bool dirty = true, holding = false, shift_down = false;
     double hold_start = 0;
 
     for (;;) {
         if (dirty) { drm_present(&d, &a); dirty = false; }
+
+        /* ★ 长耗时动作在这里执行，而不是在 on_tap 里 —— 上面刚重绘过一帧，
+         *   所以用户看到的是"正在搜索……"而不是僵住的旧画面。 */
+        if (a.pending) {
+            int act = a.pending; a.pending = 0;
+            do_pending(&a, act);
+            dirty = true;
+        }
 
         struct pollfd pfd;
         pfd.fd = libinput_get_fd(li); pfd.events = POLLIN; pfd.revents = 0;
