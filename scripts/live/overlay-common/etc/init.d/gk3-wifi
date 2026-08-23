@@ -30,8 +30,31 @@ start() {
     # lo 自己拉起来：不依赖 ifupdown-ng 的 networking 服务在哪个子包里
     ip link set lo up 2>/dev/null
 
+    # ★ 兜底：ath11k 是内建驱动，在 initramfs 阶段就要固件。正常情况下固件
+    #   已经打进 initramfs（见 build-initramfs.sh --firmware），probe 就成功了。
+    #   万一没赶上，这里【重新绑定一次】—— 此刻 squashfs 已经挂好，
+    #   /lib/firmware 里的固件一定拿得到。
+    #   ⚠️ 这是安全网，不是正解：真正的修复是固件进 initramfs。
     if [ ! -e "/sys/class/net/$IFACE" ]; then
-        eerror "没有 $IFACE —— ath11k 没起来？看 dmesg | grep ath11k"
+        ewarn "没有 $IFACE —— 试着重新绑定 ath11k_pci"
+        DRV=/sys/bus/pci/drivers/ath11k_pci
+        if [ -d "$DRV" ]; then
+            for dev in $(ls /sys/bus/pci/devices/); do
+                if [ "$(cat /sys/bus/pci/devices/$dev/vendor 2>/dev/null)" = "0x17cb" ]; then
+                    echo "$dev" > "$DRV/unbind" 2>/dev/null
+                    echo "$dev" > "$DRV/bind"   2>/dev/null
+                    einfo "  重绑 $dev"
+                fi
+            done
+            # 给 probe 一点时间
+            i=0; while [ ! -e "/sys/class/net/$IFACE" ] && [ $i -lt 15 ]; do sleep 1; i=$((i+1)); done
+        else
+            ewarn "  连 $DRV 都没有 —— 驱动没编进内核？"
+        fi
+    fi
+
+    if [ ! -e "/sys/class/net/$IFACE" ]; then
+        eerror "还是没有 $IFACE。看 /media/gk3/gaokun3/diag/ 里 gk3-diag 写的日志"
         return 1
     fi
     CONF=

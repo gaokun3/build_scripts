@@ -285,7 +285,9 @@ need_path /etc/runlevels/boot/localmount     # gk3-* 排在它后面；缺了会
 need_path /etc/runlevels/sysinit/devfs
 # ★ 断言两个服务【没有】硬依赖：`need` 一旦指向不存在的服务，
 #   OpenRC 会静默不启动它 —— 这是 2026-08-23 那次"起来了但没网没 ssh"的真凶。
-if in_ch 'grep -q "need " /etc/init.d/gk3-wifi /etc/init.d/gk3-sshd'; then
+# ⚠️ 判据要锚定行首的实际指令 —— 第一版写成 `grep -q "need "`，
+#    结果匹配到了我自己在注释里写的"不能用 need"，当场自我误报。
+if in_ch 'grep -qE "^[[:space:]]*need " /etc/init.d/gk3-wifi /etc/init.d/gk3-sshd'; then
     echo "   ✗ gk3-wifi/gk3-sshd 里还有 need 硬依赖"; BAD=1
 else ok "gk3-* 只用 after 排序依赖，没有 need"; fi
 # ★ 这条断言的由来见上面第 5 步：root 锁着的话，公钥、权限、配置全对也登不进去，
@@ -317,6 +319,22 @@ cleanup; trap - EXIT; chroot_clean
 cp "$ROOTFS/bin/busybox.static" "$OUT/busybox.static"
 ok "留下 busybox.static 给 initramfs 用"
 
+# ★★ WiFi 固件也要抠出来给 initramfs。
+# ⚠️ 这不是"顺手带上"，是必需的：ath11k 是【内建驱动】（=y），它在内核
+#   启动早期就 probe，那时根文件系统还是 initramfs —— squashfs 里的固件
+#   要等 initramfs 找到介质才存在，**已经晚了**。probe 失败后驱动不会重试，
+#   wlan0 根本不出现。
+#   2026-08-23 上机现象：救援系统起来了但"网卡起不来"。
+#   Android 那边能成，是因为 ueventd 实现了内核的固件用户态助手；
+#   我们的 initramfs 里没有任何东西干这件事，所以固件必须【直接在里面】。
+rm -rf "$OUT/fw"; mkdir -p "$OUT/fw/lib/firmware"
+if [ -d "$ROOTFS/lib/firmware/ath11k" ]; then
+    cp -a "$ROOTFS/lib/firmware/ath11k" "$OUT/fw/lib/firmware/"
+    ok "留下 ath11k 固件给 initramfs（$(du -sh "$OUT/fw" | cut -f1)）"
+else
+    die "rootfs 里没有 /lib/firmware/ath11k —— initramfs 会造出一个没网的救援系统"
+fi
+
 SQUASH=$OUT/gaokun3-$PROFILE.squashfs
 rm -f "$SQUASH"
 mksquashfs "$ROOTFS" "$SQUASH" -comp zstd -Xcompression-level 19 -noappend -no-progress
@@ -331,4 +349,4 @@ if [ -n "${SUDO_USER:-}" ]; then
     ok "产物归还给 $SUDO_USER"
 fi
 echo
-echo "下一步：bash scripts/live/build-initramfs.sh --busybox $OUT/busybox.static --out $OUT"
+echo "下一步：bash scripts/live/build-initramfs.sh --busybox $OUT/busybox.static --firmware $OUT/fw --out $OUT"
