@@ -57,7 +57,57 @@ static void rrect(cairo_t *cr, double x, double y, double w, double h, double r)
 }
 
 /* Pango 画文字。用 "Sans" 让 fontconfig 去挑 —— 镜像里装了 wqy-zenhei，
- * 中文会自动回退过去。写死字体名反而会在换字体包时静默变成方框。 */
+ * 中文会自动回退过去。写死字体名反而会在换字体包时静默变成方框。
+ *
+ * ⚠️★ 性能：第一版每次调用都 pango_cairo_create_layout() +
+ *   pango_font_description_from_string()（要解析字符串！），一屏十几处文字
+ *   就是十几次。实测设备上一帧 100 ms 以上，每点一下要等 0.15 秒才有反应 ——
+ *   用户的原话是"十分卡顿"。
+ *   现在：字体描述按字号缓存；整帧共用一个 layout。
+ */
+#define FD_CACHE 12
+static struct { double size; PangoFontDescription *fd; } g_fd[FD_CACHE];
+static int g_nfd;
+static PangoLayout *g_layout;      /* 整帧共用；drawing_begin/end 管理 */
+
+static PangoFontDescription *font_for(double size)
+{
+    for (int i = 0; i < g_nfd; i++) if (g_fd[i].size == size) return g_fd[i].fd;
+    char name[64]; snprintf(name, sizeof name, "Sans %g", size);
+    PangoFontDescription *fd = pango_font_description_from_string(name);
+    if (g_nfd < FD_CACHE) { g_fd[g_nfd].size = size; g_fd[g_nfd].fd = fd; g_nfd++; }
+    return fd;
+}
+
+static void drawing_begin(cairo_t *cr)
+{
+    if (g_layout) g_object_unref(g_layout);
+    g_layout = pango_cairo_create_layout(cr);
+}
+static void drawing_end(void)
+{
+    if (g_layout) { g_object_unref(g_layout); g_layout = NULL; }
+}
+
+/* 排一段文字并返回高度。不画，只量。 */
+static double layout_set(cairo_t *cr, const char *sTxt, double w, double size, const char *align)
+{
+    if (!g_layout) drawing_begin(cr);
+    pango_layout_set_font_description(g_layout, font_for(size));
+    pango_layout_set_text(g_layout, sTxt, -1);
+    if (w > 0) {
+        pango_layout_set_width(g_layout, (int)(w * PANGO_SCALE));
+        pango_layout_set_wrap(g_layout, PANGO_WRAP_WORD_CHAR);
+        pango_layout_set_alignment(g_layout,
+            !strcmp(align, "center") ? PANGO_ALIGN_CENTER :
+            !strcmp(align, "right")  ? PANGO_ALIGN_RIGHT  : PANGO_ALIGN_LEFT);
+    } else {
+        pango_layout_set_width(g_layout, -1);
+    }
+    int hh; pango_layout_get_pixel_size(g_layout, NULL, &hh);
+    return hh;
+}
+
 static void text(cairo_t *cr, double x, double y, double w, double size,
                  Col c, const char *align, const char *fmt, ...)
 {
@@ -65,39 +115,18 @@ static void text(cairo_t *cr, double x, double y, double w, double size,
     va_list ap; va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
-
-    PangoLayout *l = pango_cairo_create_layout(cr);
-    char font[64]; snprintf(font, sizeof font, "Sans %g", size);
-    PangoFontDescription *fd = pango_font_description_from_string(font);
-    pango_layout_set_font_description(l, fd);
-    pango_font_description_free(fd);
-    pango_layout_set_text(l, buf, -1);
-    if (w > 0) {
-        pango_layout_set_width(l, (int)(w * PANGO_SCALE));
-        pango_layout_set_wrap(l, PANGO_WRAP_WORD_CHAR);
-        if (!strcmp(align, "center")) pango_layout_set_alignment(l, PANGO_ALIGN_CENTER);
-        else if (!strcmp(align, "right")) pango_layout_set_alignment(l, PANGO_ALIGN_RIGHT);
-    }
+    layout_set(cr, buf, w, size, align);
     set_col(cr, c);
     cairo_move_to(cr, x, y);
-    pango_cairo_show_layout(cr, l);
-    g_object_unref(l);
+    pango_cairo_show_layout(cr, g_layout);
 }
 
-static double text_h(cairo_t *cr, double w, double size, const char *s)
+/* ⚠️ 只在真的需要"先量后画"时用它。button() 里曾经量一遍再画一遍，
+ *    等于同一段文字排版两次。 */
+static double text_h(cairo_t *cr, double w, double size, const char *sTxt)
 {
-    PangoLayout *l = pango_cairo_create_layout(cr);
-    char font[64]; snprintf(font, sizeof font, "Sans %g", size);
-    PangoFontDescription *fd = pango_font_description_from_string(font);
-    pango_layout_set_font_description(l, fd);
-    pango_font_description_free(fd);
-    pango_layout_set_text(l, s, -1);
-    if (w > 0) { pango_layout_set_width(l, (int)(w * PANGO_SCALE)); pango_layout_set_wrap(l, PANGO_WRAP_WORD_CHAR); }
-    int hh; pango_layout_get_pixel_size(l, NULL, &hh);
-    g_object_unref(l);
-    return hh;
+    return layout_set(cr, sTxt, w, size, "left");
 }
-
 /* ── 可点区域 ──────────────────────────────────────────────────────────── */
 /* 每一帧重新登记。⚠️ 触摸目标最小 88 逻辑像素 —— 这机器没有鼠标，
  * 手指在 13 英寸屏上的实际接触面积远大于设计稿上看着的那点。 */
@@ -116,6 +145,7 @@ static void hit_reset(void) { g_nhits = 0; }
 struct Field { char buf[128]; int len; bool secret; };
 typedef struct Field Field;
 static void focus_ring(cairo_t *cr);
+static void press_flash(cairo_t *cr);
 static Field *g_field_focused;   /* 当前有焦点的输入框；没有就是 NULL */
 static void field_draw(cairo_t *cr, double x, double y, double w, double h,
                        Field *f, int id, const char *placeholder);
@@ -146,8 +176,11 @@ static void button(cairo_t *cr, double x, double y, double w, double h,
         cairo_set_line_width(cr, 2); cairo_stroke(cr);
     }
     Col tc = primary ? (Col){0.05,0.07,0.09,1} : (enabled ? C_TEXT : C_MUTED);
-    double th = text_h(cr, w, 21, label);
-    text(cr, x, y + (h - th) / 2, w, 21, tc, "center", "%s", label);
+    /* 排一次，量到高度之后【直接用同一个 layout 画】—— 不再排第二遍 */
+    double th = layout_set(cr, label, w, 21, "center");
+    set_col(cr, tc);
+    cairo_move_to(cr, x, y + (h - th) / 2);
+    pango_cairo_show_layout(cr, g_layout);
     hit_add(x, y, w, h, id, enabled);
 }
 
@@ -338,6 +371,10 @@ enum {
  * drm_backend.inc 都要用，而它们在文件里都排在前面。
  * ⚠️ C 是"先声明后使用"，把定义堆在文件末尾会编不过（实测踩了）。 */
 static int  g_focus = -1;      /* g_hits 里的下标；-1 = 没有焦点 */
+/* 按下反馈。★ 没有它的话，从手指按下到整帧重绘完成之间屏幕毫无变化，用户会
+ * 以为没点上 —— 即使重绘只要 50 ms，感觉也是"没反应"。
+ * ⚠️ 和 g_focus 一样：定义必须在 drm_backend.inc 之前，不能堆在文件末尾。 */
+static int  g_pressed = -1;
 static bool g_kbd_used;        /* 用过键盘没有 —— 没用过就不画焦点框 */
 static bool ui_key(App *a, unsigned code, bool shift);
 
@@ -775,6 +812,7 @@ static void draw(cairo_t *cr, App *a)
     }
     /* ★ 焦点框画在最后 —— 于是它对每一种控件都自动生效，
      *   不用去 button()/card()/field_draw() 里各加一遍。 */
+    press_flash(cr);
     focus_ring(cr);
 }
 
@@ -1143,7 +1181,9 @@ static void render_png(App *a, const char *dir, const char *name)
 {
     cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, (int)UI_W, (int)UI_H);
     cairo_t *cr = cairo_create(s);
+    drawing_begin(cr);
     draw(cr, a);
+    drawing_end();
     char path[512]; snprintf(path, sizeof path, "%s/%s.png", dir, name);
     cairo_surface_write_to_png(s, path);
     cairo_destroy(cr); cairo_surface_destroy(s);
@@ -1386,6 +1426,19 @@ static void field_key(Field *f, unsigned code, bool shift)
 }
 
 /* 焦点框：画在最后，所以对每一种控件都自动生效 —— 不用去每个控件里加代码 */
+static void press_flash(cairo_t *cr)
+{
+    if (g_pressed < 0) return;
+    for (int i = 0; i < g_nhits; i++) {
+        if (g_hits[i].id != g_pressed) continue;
+        Hit *t = &g_hits[i];
+        rrect(cr, t->x, t->y, t->w, t->h, 16);
+        cairo_set_source_rgba(cr, 1, 1, 1, 0.18);
+        cairo_fill(cr);
+        break;
+    }
+}
+
 static void focus_ring(cairo_t *cr)
 {
     if (!g_kbd_used || g_focus < 0 || g_focus >= g_nhits) return;

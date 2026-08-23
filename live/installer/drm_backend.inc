@@ -109,18 +109,42 @@ static int drm_make_fb(Drm *d)
     return drmModeSetCrtc(d->fd, d->crtc_id, d->fb_id, 0, 0, &d->conn_id, 1, &d->mode);
 }
 
+/* ★★ 影子缓冲：先画在普通内存里，最后整块 memcpy 到显存。
+ *
+ * ⚠️ 这不是"优化"，是必需的。DRM dumb buffer 映射出来的是 write-combining
+ *    内存 —— 写很快，**读极慢**。而 cairo 每一次带 alpha 的填充、每一个字形
+ *    混合，都要【读一次目标像素】做混合。直接画在显存上等于整帧都在对 WC
+ *    内存做读-改-写，慢得离谱。
+ *    画在普通内存里则全速，最后一次顺序 memcpy 到显存 —— WC 内存对顺序写
+ *    恰好是最快的。
+ *
+ * 这是本轮"十分卡顿"的头号嫌疑（另外两个是 Pango 每帧重建 layout、
+ * button 排版两遍，都已修）。
+ */
+static unsigned char *g_shadow;
+static size_t g_shadow_size;
+
 static void drm_present(Drm *d, App *a)
 {
+    if (!g_shadow || g_shadow_size != d->size) {
+        free(g_shadow);
+        g_shadow = malloc(d->size);
+        g_shadow_size = d->size;
+        if (!g_shadow) { fprintf(stderr, "!! 影子缓冲分配失败\n"); return; }
+    }
     cairo_surface_t *s = cairo_image_surface_create_for_data(
-        d->map, CAIRO_FORMAT_RGB24, d->width, d->height, d->pitch);
+        g_shadow, CAIRO_FORMAT_RGB24, d->width, d->height, d->pitch);
     cairo_t *cr = cairo_create(s);
+    drawing_begin(cr);          /* 整帧共用一个 Pango layout */
     cairo_translate(cr, d->width, 0);
     cairo_rotate(cr, M_PI / 2);
     cairo_scale(cr, GK3_SX(d), GK3_SY(d));   /* 与 drm_to_logical 成对，别单改一边 */
     draw(cr, a);
+    drawing_end();
     cairo_destroy(cr);
     cairo_surface_flush(s);
     cairo_surface_destroy(s);
+    memcpy(d->map, g_shadow, d->size);   /* 一次顺序写，这是 WC 内存喜欢的形状 */
 }
 
 static int li_open(const char *path, int flags, void *ud)
@@ -308,7 +332,15 @@ static int run_drm(void)
             if (down && lx >= 0) {
                 int id = hit_test(lx, ly);
                 if (id == ID_CONFIRM_HOLD) { holding = true; hold_start = now_s(); }
-                else if (id != ID_NONE && on_tap(&a, id)) dirty = true;
+                else if (id != ID_NONE) {
+                    /* ★ 先把"按下"画出来再干活：哪怕后面的处理要几十毫秒，
+                     *   用户也立刻看到了反馈。没有这一步，慢一点就像没点上。 */
+                    g_pressed = id;
+                    drm_present(&d, &a);
+                    g_pressed = -1;
+                    if (on_tap(&a, id)) dirty = true;
+                    else dirty = true;   /* 至少要把按下的高亮擦掉 */
+                }
             }
             /* ⚠️ 松手就重来：这一步不可撤销，必须是明确的持续意图 */
             if (up && holding) { holding = false; a.hold = 0; dirty = true; }
