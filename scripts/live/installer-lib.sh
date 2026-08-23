@@ -43,7 +43,14 @@ gk3_probe() {
     local d
     for d in /sys/block/*; do
         local name; name=$(basename "$d")
-        case "$name" in loop*|ram*|zram*|dm-*|sr*|md*) continue ;; esac
+        # ⚠️ 正常情况下跳过 loop —— 没人往 loop 设备装系统。但测试需要它，
+        #    所以给一个显式开关：GK3_ALLOW_LOOP=1。
+        #    （否则 test-shrink.sh 没法用 gk3_probe 验"空间释放出来了没有"，
+        #     只能另写一套算法，而那就等于测了两份不同的逻辑。）
+        case "$name" in
+            loop*)  [ "${GK3_ALLOW_LOOP:-0}" = 1 ] || continue ;;
+            ram*|zram*|dm-*|sr*|md*) continue ;;
+        esac
         [ -e "/dev/$name" ] || continue
         local sectors; sectors=$(cat "$d/size" 2>/dev/null || echo 0)
         [ "$sectors" -gt 0 ] || continue

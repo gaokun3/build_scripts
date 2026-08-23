@@ -89,7 +89,7 @@ else
 fi
 
 echo "═══ 4. 空间真的释放出来了吗 ═══"
-FREE=$(gk3_probe 2>/dev/null | grep "^FREE disk=$LOOP" | awk '{for(i=1;i<=NF;i++){split($i,a,"=");if(a[1]=="size_mib")s+=a[2]}}END{print s+0}')
+FREE=$(GK3_ALLOW_LOOP=1 gk3_probe 2>/dev/null | grep "^FREE disk=$LOOP" | awk '{for(i=1;i<=NF;i++){split($i,a,"=");if(a[1]=="size_mib")s+=a[2]}}END{print s+0}')
 [ "${FREE:-0}" -ge 5000 ] && ok "空闲空间 ${FREE} MiB（期望 ≥5000）" || bad "只释放出 ${FREE:-0} MiB"
 
 echo "═══ 5. 拒绝缩到太小 ═══"
