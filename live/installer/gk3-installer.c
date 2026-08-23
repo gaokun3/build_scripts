@@ -635,6 +635,10 @@ static int run_png(const char *dir)
     return 0;
 }
 
+#ifdef GK3_DRM
+#include "drm_backend.inc"
+#endif
+
 int main(int argc, char **argv)
 {
     const char *png = NULL;
@@ -649,7 +653,7 @@ int main(int argc, char **argv)
     }
     if (png) return run_png(png);
 #ifdef GK3_DRM
-    return run_drm(g_lib);
+    return run_drm();
 #else
     fprintf(stderr, "这个构建没有 DRM 后端。用 --png-dir 做离线渲染，"
                     "或者用 -DGK3_DRM 重新编译。\n");

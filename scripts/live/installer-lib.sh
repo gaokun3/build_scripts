@@ -260,3 +260,263 @@ gk3__emit_part() {
     echo "PLAN op=mkpart disk=$disk num=0 name=$name start=$start end=$end size_mib=$mib type=$type"
     GK3_CUR=$(( end + 1 ))
 }
+
+# ── 执行 ────────────────────────────────────────────────────────────────────
+# 这是【唯一】会写盘的函数。
+#
+#   gk3_apply --disk X --mode wipe|alongside --rescue yes|no --release DIR \
+#             [--region-start S --region-end E --esp PATH]
+#
+# 进度打在 stderr：`PROGRESS <百分比> <说明>`，其余是日志。
+#
+# ⚠️★ GK3_DRYRUN=1 时【只打印不执行】。写这个开关不是为了方便 ——
+#   是因为这段代码一旦错了就是别人的一整块盘，而它没法在 CI 里跑。
+#   任何改动都应当先用 dry-run 看一遍要执行的命令序列。
+gk3_apply() {
+    local disk="" mode=wipe rescue=no rel="" rstart="" rend="" esp=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --disk) disk=$2; shift 2 ;;
+            --mode) mode=$2; shift 2 ;;
+            --rescue) rescue=$2; shift 2 ;;
+            --release) rel=$2; shift 2 ;;
+            --region-start) rstart=$2; shift 2 ;;
+            --region-end) rend=$2; shift 2 ;;
+            --esp) esp=$2; shift 2 ;;
+            *) gk3_die "apply: 不认识的参数 $1"; return 1 ;;
+        esac
+    done
+    [ -n "$disk" ] || { gk3_die "apply 要 --disk"; return 1; }
+    [ -n "$rel" ] && [ -d "$rel" ] || { gk3_die "apply 要 --release <目录>"; return 1; }
+
+    local DRY=${GK3_DRYRUN:-0}
+    gk3__run() {
+        if [ "$DRY" = 1 ]; then echo "DRY: $*"; else
+            echo "+ $*"
+            "$@" || { gk3_die "失败：$*"; return 1; }
+        fi
+    }
+
+    # ── 安全闸 1：不能写自己正跑在上面的那块盘 ──────────────────────────
+    # ⚠️ 安装器要么从 U 盘跑、要么从内置盘的救援分区跑。后者做整盘清空
+    #    等于把自己脚下的地板锯掉 —— 而且是【跑到一半】才死，盘已经毁了。
+    local medium_dev medium_disk
+    medium_dev=$(findmnt -no SOURCE /media/gk3 2>/dev/null || echo "")
+    if [ -n "$medium_dev" ]; then
+        medium_disk=$(lsblk -no PKNAME "$medium_dev" 2>/dev/null | head -1)
+        [ -n "$medium_disk" ] && medium_disk=/dev/$medium_disk
+    fi
+    if [ "$mode" = wipe ] && [ -n "${medium_disk:-}" ] && [ "$medium_disk" = "$disk" ]; then
+        gk3_die "拒绝：安装介质（$medium_dev）就在目标盘 $disk 上，整盘清空会锯掉自己脚下的地板"
+        return 1
+    fi
+
+    # ── 安全闸 2：目标盘上不能有已挂载的分区 ────────────────────────────
+    local mounted
+    mounted=$(lsblk -nro MOUNTPOINT "$disk" 2>/dev/null | grep -v '^$' | tr '\n' ' ')
+    if [ -n "$mounted" ] && [ "$mode" = wipe ]; then
+        gk3_die "拒绝：$disk 上还有挂载着的分区（$mounted）"
+        return 1
+    fi
+
+    # ── 方案 ────────────────────────────────────────────────────────────
+    gk3_prog 2 "计算分区方案"
+    local plan
+    plan=$(gk3_plan --disk "$disk" --mode "$mode" --rescue "$rescue" \
+                    ${rstart:+--region-start "$rstart"} ${rend:+--region-end "$rend"} \
+                    ${esp:+--esp "$esp"}) || { echo "$plan"; return 1; }
+    printf '%s\n' "$plan" | grep -q '^PLANERR' && { printf '%s\n' "$plan" | grep '^PLANERR'; return 1; }
+
+    # ── 建分区 ──────────────────────────────────────────────────────────
+    gk3_prog 5 "写分区表"
+    if printf '%s\n' "$plan" | grep -q '^PLAN op=wipe'; then
+        gk3__run sgdisk --zap-all "$disk" || return 1
+    fi
+    local line name start end ptype
+    while read -r line; do
+        case "$line" in "PLAN op=mkpart"*) ;; *) continue ;; esac
+        name=$(gk3__f "$line" name); start=$(gk3__f "$line" start)
+        end=$(gk3__f "$line" end);   ptype=$(gk3__f "$line" type)
+        gk3__run sgdisk -n "0:${start}:${end}" -t "0:${ptype}" -c "0:${name}" "$disk" || return 1
+    done <<EOF
+$(printf '%s\n' "$plan")
+EOF
+    gk3__run partprobe "$disk" || true
+    [ "$DRY" = 1 ] || sleep 2
+
+    # ── 格式化 ──────────────────────────────────────────────────────────
+    gk3_prog 15 "格式化"
+    # ⚠️★ 每一个分区节点都必须【解析成功且确实是块设备】才往下走。
+    #   loop 设备实测暴露过：partprobe 还没沉降时 gk3__bylabel 会返回空串，
+    #   于是命令变成 `dd of=` / `mkfs.ext4 -F ""` —— 那种情况下会发生什么
+    #   完全不可预料，而此时分区表已经写下去了，盘已经不是原来的盘。
+    #   **宁可在这里停住，也不能带着空路径继续。**
+    local p_esp p_meta p_data p_super p_boota p_bootb p_resc p_misc
+    p_esp=$(gk3__need_part "$disk" esp "$mode")     || return 1
+    p_misc=$(gk3__need_part "$disk" misc "$mode")   || return 1
+    p_meta=$(gk3__need_part "$disk" metadata "$mode")   || return 1
+    p_data=$(gk3__need_part "$disk" userdata "$mode")   || return 1
+    p_super=$(gk3__need_part "$disk" super "$mode")     || return 1
+    p_boota=$(gk3__need_part "$disk" boot_a "$mode")    || return 1
+    p_bootb=$(gk3__need_part "$disk" boot_b "$mode")    || return 1
+    if [ "$rescue" = yes ]; then
+        p_resc=$(gk3__need_part "$disk" gk3rescue "$mode") || return 1
+    fi
+
+    if [ "$mode" = wipe ]; then
+        gk3__run mkfs.vfat -F 32 -n ESP "$p_esp" || return 1
+    else
+        p_esp=$esp    # 复用现有 ESP，绝不格式化它
+        echo "复用现有 ESP：$p_esp（不格式化）"
+    fi
+    gk3__run mkfs.ext4 -q -F -L metadata "$p_meta" || return 1
+    gk3__run mkfs.ext4 -q -F -L userdata "$p_data" || return 1
+    # misc 必须是全零：bootloader_control 的初始状态就是空
+    gk3__run dd if=/dev/zero of="$p_misc" bs=1M count=4 status=none || return 1
+    [ "$rescue" = yes ] && { gk3__run mkfs.ext4 -q -F -L gk3rescue "$p_resc" || return 1; }
+
+    # ── 写镜像 ──────────────────────────────────────────────────────────
+    gk3_prog 30 "展开并写入 super.img（约 12 GiB）"
+    [ -f "$rel/super.img" ] || { gk3_die "发布目录里没有 super.img"; return 1; }
+    # ⚠️ super.img 是 Android sparse 格式，直接 dd 会得到一个"校验和对得上
+    #    但没有 LP 元数据"的分区（stage2-findings 第 1 节踩过）。
+    if [ "$DRY" = 1 ]; then echo "DRY: simg2img $rel/super.img $p_super"
+    else
+        if head -c4 "$rel/super.img" | od -An -tx1 | tr -d ' \n' | grep -qi '3aff26ed'; then
+            simg2img "$rel/super.img" "$p_super" || { gk3_die "simg2img 失败"; return 1; }
+        else
+            echo "super.img 不是 sparse 格式，直接写"
+            dd if="$rel/super.img" of="$p_super" bs=4M status=none || return 1
+        fi
+    fi
+
+    gk3_prog 70 "写入 boot_a / boot_b"
+    [ -f "$rel/boot.img" ] || { gk3_die "发布目录里没有 boot.img"; return 1; }
+    gk3__run dd if="$rel/boot.img" of="$p_boota" bs=4M status=none || return 1
+    gk3__run dd if="$rel/boot.img" of="$p_bootb" bs=4M status=none || return 1
+
+    # ── 引导链 ──────────────────────────────────────────────────────────
+    # ⚠️ 少了这一步，前面所有东西都写对了，机器照样起不来 —— 这台机器是 UEFI，
+    #    内核/dtb/ramdisk 是 ESP 上的【普通文件】，不在 boot 分区里被引导。
+    #    （boot_a/boot_b 有内容是为了让 update_engine 的 A/B 流程完整。）
+    gk3_prog 80 "安装引导链"
+    local mid; mid=${GK3_MACHINE_ID:-$(cat /etc/machine-id 2>/dev/null || echo 8a29534fa802480d9fbb71aa18c01d7b)}
+    local mnt; mnt=$(mktemp -d)
+    gk3__run mount -t vfat "$p_esp" "$mnt" || return 1
+
+    local sdboot=${GK3_SDBOOT:-/usr/share/gaokun3/systemd-bootaa64.efi}
+    [ -f "$sdboot" ] || sdboot="$rel/systemd-bootaa64.efi"
+    [ -f "$sdboot" ] || { umount "$mnt"; gk3_die "找不到 systemd-bootaa64.efi"; return 1; }
+
+    # 内核/dtb/ramdisk 用【松散文件】，不从 boot.img 里拆 ——
+    # 救援系统里没有 Android 的 unpack_bootimg，而我们的发布本来就带这三个文件。
+    local f
+    for f in Image gaokun3.dtb ramdisk.img; do
+        [ -f "$rel/$f" ] || { umount "$mnt"; gk3_die "发布目录里缺 $f"; return 1; }
+    done
+
+    if [ "${GK3_DRYRUN:-0}" != 1 ]; then
+        mkdir -p "$mnt/EFI/BOOT" "$mnt/EFI/systemd" "$mnt/loader/entries"                  "$mnt/$mid/android/slot_a" "$mnt/$mid/android/slot_b" "$mnt/$mid/rescue"
+        cp "$sdboot" "$mnt/EFI/BOOT/BOOTAA64.EFI"
+        cp "$sdboot" "$mnt/EFI/systemd/systemd-bootaa64.efi"
+        local slot
+        for slot in a b; do
+            cp "$rel/Image" "$rel/gaokun3.dtb" "$rel/ramdisk.img" "$mnt/$mid/android/slot_$slot/"
+            cat > "$mnt/loader/entries/$mid-android-$slot.conf" <<ENTRY
+title      Android (slot_$slot)
+version    android-$slot
+sort-key   android$slot
+linux      /$mid/android/slot_$slot/Image
+devicetree /$mid/android/slot_$slot/gaokun3.dtb
+initrd     /$mid/android/slot_$slot/ramdisk.img
+options    androidboot.slot_suffix=_$slot androidboot.hardware=gaokun3 androidboot.selinux=permissive androidboot.veritymode=disabled androidboot.verifiedbootstate=orange androidboot.flash.locked=0 clk_ignore_unused pd_ignore_unused arm64.nopauth iommu.passthrough=0 iommu.strict=0 efi=noruntime deferred_probe_timeout=10 firmware_class.path=/vendor/firmware/ fbcon=rotate:1 loglevel=4
+ENTRY
+        done
+        # ★ 默认落点是 slot_a；救援系统装了的话它排在前面（sort-key linux1），
+        #   但【不设成 default】—— 默认必须是能用的系统。
+        cat > "$mnt/loader/loader.conf" <<LOADER
+timeout 15
+console-mode keep
+editor no
+default *-android-a.conf
+LOADER
+        if [ "$rescue" = yes ]; then
+            [ -f "$rel/initramfs.img" ] && cp "$rel/initramfs.img" "$mnt/$mid/rescue/initramfs.img"
+            cat > "$mnt/loader/entries/$mid-rescue-alpine.conf" <<RESC
+title      救援系统（Alpine，全内存）
+version    alpine-rescue
+sort-key   linux1
+linux      /$mid/android/slot_a/Image
+devicetree /$mid/android/slot_a/gaokun3.dtb
+initrd     /$mid/rescue/initramfs.img
+options    clk_ignore_unused pd_ignore_unused arm64.nopauth iommu.passthrough=0 iommu.strict=0 efi=noruntime fbcon=rotate:1 loglevel=4 panic=10 gk3.squash=/gaokun3/rescue.squashfs
+RESC
+        fi
+        sync
+    else
+        echo "DRY: 往 $p_esp 写 systemd-boot、两个 Android 启动项、内核/dtb/ramdisk"
+    fi
+    gk3__run umount "$mnt" || true
+    rmdir "$mnt" 2>/dev/null || true
+
+    # ── 救援系统 ────────────────────────────────────────────────────────
+    if [ "$rescue" = yes ] && [ -f "$rel/rescue.squashfs" ]; then
+        gk3_prog 92 "写入救援系统"
+        local rmnt; rmnt=$(mktemp -d)
+        gk3__run mount "$p_resc" "$rmnt" || return 1
+        if [ "${GK3_DRYRUN:-0}" != 1 ]; then
+            mkdir -p "$rmnt/gaokun3"
+            cp "$rel/rescue.squashfs" "$rmnt/gaokun3/rescue.squashfs"
+            # ⚠️ WiFi 凭据【不打包进镜像】：安装器把用户当前用的那份复制过去，
+            #    这样救援系统一开机就能连上同一个网。见 gk3-wifi 的注释。
+            [ -f "$rel/wpa_supplicant.conf" ] && {
+                install -Dm600 "$rel/wpa_supplicant.conf" "$rmnt/gaokun3/wpa_supplicant.conf"; }
+            sync
+        fi
+        gk3__run umount "$rmnt" || true
+        rmdir "$rmnt" 2>/dev/null || true
+    fi
+
+    gk3_prog 100 "完成"
+    return 0
+}
+
+# 解析分区节点，解析不出来就直接失败。
+# dry-run 时分区还不存在，回一个明显是占位的名字，好让打印出来的命令可读。
+gk3__need_part() {
+    local disk=$1 want=$2 mode=$3 path
+    if [ "${GK3_DRYRUN:-0}" = 1 ]; then echo "<${want}分区>"; return 0; fi
+    path=$(gk3__bylabel "$disk" "$want")
+    if [ -z "$path" ]; then
+        gk3_die "分区 $want 没解析出来（$disk 上找不到这个 PARTLABEL）"; return 1
+    fi
+    # ⚠️ 分区节点的出现是异步的（udev / devtmpfs），刚写完分区表时它可能还没到。
+    #    第一版在这里直接判死，结果 loop 设备实测必然失败 —— 而 lsblk 明明
+    #    看得见分区。**"还没出现"和"不存在"是两回事**：等它，别判它死。
+    local i=0
+    while [ ! -b "$path" ] && [ $i -lt 50 ]; do
+        [ $i -eq 0 ] && command -v udevadm >/dev/null && udevadm settle --timeout=5 2>/dev/null
+        sleep 0.2; i=$((i+1))
+    done
+    if [ ! -b "$path" ]; then
+        gk3_die "$path 等了 10 秒还不是块设备 —— 分区表写下去了但内核没认"; return 1
+    fi
+    echo "$path"
+}
+
+# 从一行 key=value 里取值
+gk3__f() {
+    printf '%s\n' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1
+}
+
+# 按 PARTLABEL 找分区节点。⚠️ 不用 /dev/disk/by-partlabel —— 救援系统里
+# 没有 udev 规则时那个目录可能不存在；直接问 sgdisk 才是确定的。
+gk3__bylabel() {
+    local disk=$1 want=$2 n
+    for n in $(sgdisk -p "$disk" 2>/dev/null | awk '/^ *[0-9]+ /{print $1}'); do
+        if [ "$(sgdisk -i "$n" "$disk" 2>/dev/null | sed -n "s/^Partition name: '\(.*\)'/\1/p")" = "$want" ]; then
+            gk3_partpath "$disk" "$n"; return 0
+        fi
+    done
+    echo ""
+}

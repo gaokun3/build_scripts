@@ -237,6 +237,22 @@ fi
 install -Dm644 "$LIVE/installer-lib.sh" "$ROOTFS/usr/share/gaokun3/installer-lib.sh"
 ok "带上了安装器后端 installer-lib.sh"
 
+# ---- 6c. 图形安装器（只有 live profile 需要）------------------------------
+# ★ 在 chroot 【里面】编，所以编出来的就是目标架构的二进制 —— 不需要
+#   交叉工具链，也不会出现"宿主能编、目标跑不了"。交叉构建时靠 qemu-user。
+if [ "$PROFILE" = live ]; then
+    say "6c. 编译图形安装器"
+    chroot "$ROOTFS" /sbin/apk add --no-cache build-base pkgconf         cairo-dev pango-dev libdrm-dev libinput-dev eudev-dev >/dev/null 2>&1         || die "装不上安装器的构建依赖"
+    mkdir -p "$ROOTFS/build"
+    cp "$REPO/live/installer/gk3-installer.c" "$REPO/live/installer/drm_backend.inc"        "$REPO/live/installer/Makefile" "$ROOTFS/build/"
+    chroot "$ROOTFS" /bin/sh -c "cd /build && make drm" || die "安装器编不过"
+    install -Dm755 "$ROOTFS/build/gk3-installer" "$ROOTFS/usr/bin/gk3-installer"
+    rm -rf "$ROOTFS/build"
+    # ⚠️ 构建依赖装完就卸掉：它们有几百 MB，而镜像目标是 ≤120 MiB。
+    chroot "$ROOTFS" /sbin/apk del build-base pkgconf cairo-dev pango-dev         libdrm-dev libinput-dev eudev-dev >/dev/null 2>&1 || true
+    ok "安装器已编入镜像"
+fi
+
 # ---- 7. 断言（在做成 squashfs 之前，别把坏镜像做出来）--------------------
 say "4. 体检"
 # ⚠️★ 必须在 chroot 【里面】查。第一版在外面 `[ -e $ROOTFS/sbin/init ]`，
