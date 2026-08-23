@@ -211,26 +211,18 @@ mock 报的 skin/battery SHUTDOWN 阈值只有 **36 °C**，而
 里面有 70 MB 的 `Persisted_Capsules.bin` 和 31 MB 的 `EFI/`
 （含已抹除的 Windows 整棵树）。要往 ESP 加东西，先腾地方。
 
-### B4. LiveCD 图形安装器（设计：[stage7-live-installer.md](stage7-live-installer.md)）
-**进展（2026-08-23）**：
+### B4. LiveCD 图形安装器 —— ⏸ **用户决定暂时搁置**（2026-08-23）
+接手说明见 [stage7-installer-roadmap.md](stage7-installer-roadmap.md) 末尾。
 
-* ✅ 后端抽成库 [`scripts/live/installer-lib.sh`](../scripts/live/installer-lib.sh)
-  —— `gk3_probe` / `gk3_plan` / `gk3_apply`，命令行与图形前端**共用一套**
-  （本仓反复吃过"两份拷贝各自漂移"的亏）
-* ✅ 方案计算有**离线自测** `scripts/live/test-plan.sh`，8/8。
-  重点验两条会毁数据的不变量：**分区不重叠、不越界**。
-  ★ 第一次跑就抓到一个真 bug（函数同时用 stdout 输出数据和回传游标，
-  `$()` 把 PLAN 行整个吞了）
-* ✅ 图形前端 [`live/installer/`](../live/installer/) 七屏，**离线 PNG 渲染**
-  已在构建机上编译并逐屏看过（中文正常、禁用态写明原因而不是藏起来、
-  确认页改成"按住 2 秒"防误触）
-* ⬜ **`gk3_apply`** —— 真正写盘那一半还没写
-* ⬜ **DRM + libinput 后端** —— 还没写。先做离线那半，是因为目标机器
-  同时是日用平板，经常拿不到；没有离线渲染，改一行文案都要排队等上机
-* ⬜ 端到端真装一次
+**已验过**：后端 probe/plan/apply/shrink 全部端到端测过（apply 在 loop 设备上、
+shrink 在真 NTFS+ext 上验了文件 md5 与 PARTUUID）；20 屏离线渲染；
+DRM 输出 + 触摸 + 键盘 + 软键盘在真机上跑通。
 
-★ **救援分区从 24 GiB 降到 1 GiB**：Stage 7 之后它是 55 MiB 的 squashfs，
-不再是一整套装在盘上的 Ubuntu。
+**还欠**：WiFi 页重做成两步式、apply 接网络安装、专业分区页的值回灌 plan、
+**端到端真装一次**（从来没有真的装过一台机器）。
+
+★ 回来时记住：**设备自己能编译**（Alpine aarch64 + 网），
+改一行到真机看见效果约 30 秒，不用重建镜像。
 
 ### B6. GPU SMMU 中断根治
 实际 DT 是全局 672/673、context bank 从 678 起；而硬件拉的是 675/680，
