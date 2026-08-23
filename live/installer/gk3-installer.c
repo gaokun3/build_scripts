@@ -262,25 +262,28 @@ static void sc_mode(cairo_t *cr, App *a)
 
     /* 清空整盘 */
     card(cr, 64, 180, (UI_W - 160) / 2, 300, a->mode_wipe, true);
-    text(cr, 96, 208, 480, 24, C_TEXT, "left", S_MODE_WIPE_TITLE);
-    text(cr, 96, 252, 480, 16, C_DANGER, "left", S_MODE_WIPE_WARN);
-    text(cr, 96, 320, 480, 16, C_MUTED, "left",
+    text(cr, 96, 208, 496, 24, C_TEXT, "left", S_MODE_WIPE_TITLE);
+    text(cr, 96, 252, 496, 16, C_DANGER, "left", S_MODE_WIPE_WARN);
+    text(cr, 96, 320, 496, 16, C_MUTED, "left",
          S_MODE_WIPE_BODY);
     hit_add(64, 180, (UI_W - 160) / 2, 300, ID_MODE_WIPE, true);
 
     /* 保留现有系统 */
     double x2 = 64 + (UI_W - 160) / 2 + 32;
     card(cr, x2, 180, (UI_W - 160) / 2, 300, !a->mode_wipe, can_along);
-    text(cr, x2 + 32, 208, 480, 24, can_along ? C_TEXT : C_MUTED, "left", S_MODE_ALONG_TITLE);
+    text(cr, x2 + 32, 208, 496, 24, can_along ? C_TEXT : C_MUTED, "left", S_MODE_ALONG_TITLE);
     if (can_along) {
         long best = 0;
         for (int i = 0; i < a->nfrees; i++) if (a->frees[i].size_mib > best) best = a->frees[i].size_mib;
-        text(cr, x2 + 32, 252, 480, 16, C_OK, "left",
+        text(cr, x2 + 32, 252, 496, 16, C_OK, "left",
              S_MODE_ALONG_OK);
-        text(cr, x2 + 32, 320, 480, 16, C_MUTED, "left",
+        /* ⚠️ 这一行含设备路径（/dev/nvme0n1p1 这种不可断开的长 token）。
+         *    字号比同级正文小一档、宽度取满卡片内宽 —— 否则 Pango 会从
+         *    路径中间断行，看起来像两个不同的路径。 */
+        text(cr, x2 + 32, 320, 496, 15, C_MUTED, "left",
              S_MODE_ALONG_INFO, human(best, b1, sizeof b1), a->esp);
     } else {
-        text(cr, x2 + 32, 252, 480, 16, C_MUTED, "left", "%s", why ? why : "");
+        text(cr, x2 + 32, 252, 496, 16, C_MUTED, "left", "%s", why ? why : "");
     }
     hit_add(x2, 180, (UI_W - 160) / 2, 300, ID_MODE_ALONG, can_along);
 
