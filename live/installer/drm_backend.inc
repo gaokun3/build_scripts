@@ -13,7 +13,6 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <libinput.h>
-#include <libudev.h>
 #include <linux/kd.h>
 #include <sys/ioctl.h>
 
@@ -211,12 +210,33 @@ static int run_drm(void)
     vt_graphics(1);
     atexit(vt_graphics_off);
 
-    struct udev *ud = udev_new();
-    struct libinput *li = libinput_udev_create_context(&LI_IFACE, NULL, ud);
-    if (!li || libinput_udev_assign_seat(li, "seat0")) {
-        fprintf(stderr, "!! libinput 起不来 —— 没有输入就没法用\n");
-        return 1;
+    /* ⚠️★ 【不走 udev】。第一版用 libinput_udev_create_context() +
+     *   assign_seat("seat0")，那要求 udevd 在跑 —— 而这个最小镜像的 sysinit
+     *   里只有 devfs/dmesg/sysfs/hwdrivers，没有 eudev 的 udev 服务。
+     *   结果是 libinput 一个设备都枚举不到，**完全没有触摸事件**。
+     *   ★ 用户报"没有触摸"而不是"触摸偏了" —— 这两种说法指向完全不同的
+     *     原因，值得追问清楚：偏了是变换算错，没有是根本没拿到设备。
+     *   path 后端直接把 /dev/input/event* 加进来，少一个运行时依赖。 */
+    struct libinput *li = libinput_path_create_context(&LI_IFACE, NULL);
+    if (!li) { fprintf(stderr, "!! libinput 起不来\n"); return 1; }
+    int n_in = 0;
+    for (int i = 0; i < 32; i++) {
+        char ipath[64]; snprintf(ipath, sizeof ipath, "/dev/input/event%d", i);
+        if (access(ipath, R_OK) != 0) continue;
+        struct libinput_device *idev = libinput_path_add_device(li, ipath);
+        if (!idev) continue;
+        int has_touch = libinput_device_has_capability(idev, LIBINPUT_DEVICE_CAP_TOUCH);
+        int has_ptr   = libinput_device_has_capability(idev, LIBINPUT_DEVICE_CAP_POINTER);
+        fprintf(stderr, "[gk3] 输入 %s: %s%s%s\n", ipath,
+                libinput_device_get_name(idev),
+                has_touch ? " [触摸]" : "", has_ptr ? " [指针]" : "");
+        if (has_touch || has_ptr) n_in++;
+        else libinput_path_remove_device(idev);
     }
+    if (n_in == 0)
+        fprintf(stderr, "!! 一个触摸/指针设备都没有 —— 界面画得出来但点不动\n");
+    else
+        fprintf(stderr, "[gk3] 可用输入设备 %d 个\n", n_in);
 
     App a;
     memset(&a, 0, sizeof a);

@@ -11,8 +11,8 @@ SRC      = gk3-installer.c
 
 HOST_CFLAGS = $(shell $(PKG) --cflags cairo pangocairo)
 HOST_LIBS   = $(shell $(PKG) --libs   cairo pangocairo) -lm
-DRM_CFLAGS  = $(shell $(PKG) --cflags libdrm libinput libudev)
-DRM_LIBS    = $(shell $(PKG) --libs   libdrm libinput libudev)
+DRM_CFLAGS  = $(shell $(PKG) --cflags libdrm libinput)
+DRM_LIBS    = $(shell $(PKG) --libs   libdrm libinput)
 
 all: gk3-installer-host
 
