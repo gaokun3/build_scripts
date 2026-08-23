@@ -163,6 +163,26 @@ else
     [ "$PROFILE" = rescue ] && echo "   ⚠️ 没给 --ssh-key —— 这个救援镜像将【无法 ssh 登录】"
 fi
 
+# ---- 5-bis. 解锁 root 账户 ----------------------------------------------
+# ⚠️★ 这一步不是"顺手加的"，是 2026-08-23 上机实测踩出来的：
+#   Alpine 的 /etc/shadow 里 root 是 `root:*::0:::::`，而 `*` 在 OpenSSH 眼里
+#   等于【账户已停用】。配上我们自己写的 `UsePAM no`，sshd 会在
+#   **检查公钥之前**就拒绝登录 —— 钥匙、权限位、sshd_config 全都是对的，
+#   照样 Permission denied。
+#   ★ 而且它还会误导排查：对被拒的账户，sshd 会【故意通告全部认证方式】
+#     （避免泄露账户是否存在），于是 `password` 出现在列表里，
+#     看起来像"我的 sshd_config 没生效"。第一轮我就是这么判错的。
+#
+# 做法：把密码字段清空（Alpine 官方 ISO 也是这么干的）。安全性：
+#   * 网络侧仍然只认公钥 —— sshd_config 里 PasswordAuthentication no
+#     且 PermitEmptyPasswords no
+#   * 控制台可以直接登录 —— 对一个救援/安装系统这是【需要的】：
+#     网络起不来的时候，本地控制台是最后一条路。
+#     而能碰到本机键盘的人本来就能引导任意系统，没有增加实际攻击面。
+sed -i 's/^root:[^:]*:/root::/' "$ROOTFS/etc/shadow"
+grep -q '^root::' "$ROOTFS/etc/shadow" || die "root 账户没解锁成功"
+ok "root 账户已解锁（网络侧仍然只认公钥）"
+
 # ---- 5a. ssh 主机密钥 -----------------------------------------------------
 # rescue 是【给一个人用的私有镜像】，构建时生成主机密钥 → 每次开机指纹不变，
 # 自动化不会撞 host key 变更。
@@ -250,6 +270,10 @@ need_path /bin/busybox.static
 need_path /etc/init.d/gk3-wifi
 need_path /etc/runlevels/default/gk3-wifi
 need_path /etc/runlevels/default/gk3-sshd
+# ★ 这条断言的由来见上面第 5 步：root 锁着的话，公钥、权限、配置全对也登不进去，
+#   而症状（Permission denied + 通告了 password）会把人引向完全错误的方向。
+if in_ch 'grep -q "^root::" /etc/shadow'; then ok "root 账户未锁定"; else echo "   ✗ root 账户是锁定的 —— ssh 公钥登录会被直接拒绝"; BAD=1; fi
+need_path /root/.ssh/authorized_keys
 # ★ ath11k 固件：没有它 wlan0 根本不出现，而"没网"在这台机器上等于"救援失效"。
 #   ⚠️ 不写死目录 —— linux-firmware 在 /lib 还是 /usr/lib、压不压缩，各版本不同。
 # ★ Alpine 的固件是 .zst 压缩的 —— 通配符必须带 *。
