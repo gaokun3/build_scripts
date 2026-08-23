@@ -217,3 +217,81 @@ squashfs 现在放在**救援 Ubuntu 的 p3 分区上**（`/gaokun3/rescue.squas
 而不是设计里说的独立 1 GiB 分区。
 ★ 这么做是**故意的**：验证阶段不动分区表，出问题只需删一个文件。
 等完整启动验过之后，再按设计建独立分区、并把 p3 上那 24.6 GiB 的 Ubuntu 收回。
+
+---
+
+## ★★★ M0 完成：救援系统在硬件上跑起来了（2026-08-23）
+
+```
+Alpine Linux 3.24.1  ·  7.2.0-rc2-gaokun3+ aarch64  ·  gaokun3-rescue
+根：overlay（只读 squashfs + tmpfs）    介质：/media/gk3 (ext4)
+内存：15353 MiB 总 / 161 MiB 用          WiFi：SkipM4_5G，192.168.31.174
+ssh：通
+```
+
+`sgdisk parted resize2fs mkfs.{ext4,vfat,f2fs} ntfsresize simg2img nvme rsync curl`
+全部就位，`lsblk` 看得见内置盘的全部 8 个分区。
+
+### ⚠️★ 真凶：内建驱动在 initramfs 阶段拿不到固件
+
+前两次启动都是"系统起来了但网卡没有"。**`gk3-diag` 写回介质的日志一次定案**：
+
+```
+[1.191365] ath11k_pci 0006:01:00.0: wcn6855 hw2.1
+[1.353331] mhi mhi0: Direct firmware load for ath11k/WCN6855/hw2.1/amss.bin failed with error -2
+[1.353830] ath11k_pci: failed to power up mhi: -110
+[1.354383] ath11k_pci: failed to init core: -110
+```
+
+**probe 发生在 t=1.19 秒** —— 远在 `switch_root` 之前，那时固件只可能在
+initramfs 里；squashfs 还没挂上。找不到就 `-ENOENT`，然后驱动**放弃且不重试**。
+同一时刻 remoteproc / 蓝牙 / venus / GPU 固件**全部同样 `-2`**。
+
+把 WCN6855 固件打进 initramfs 之后，同一位置变成：
+
+```
+[1.325605] mhi mhi0: Requested to power ON
+[1.325625] mhi mhi0: Power on setup success
+[2.111038] ath11k_pci: chip_id 0x12 chip_family 0xb board_id 0xff soc_id 0x400c1211
+```
+
+⚠️ 只带 WCN6855 一颗芯片：整个 `ath11k` 目录 7 款芯片约 23 MiB，
+而 initramfs 要放进只剩几十 MB 的 ESP。收窄后 **2.7 MiB**。
+
+### ★ 教训：Android 那边为什么不用管这件事
+
+Android 的 cmdline 上有 `firmware_class.path=/vendor/firmware/`，而 `/vendor`
+在早期同样没挂上 —— 我一度因此**否掉了自己的正确假说**，以为"probe 本来就是
+延后的，所以 squashfs 里的固件够得着"。
+实测打脸：ath11k 在 **1.19 秒**就 probe 了。
+★ **别用"另一个系统能行"去反推时序** —— 那两个系统的 initramfs 内容不同，
+而这正是差别所在。
+
+### ★ 没有网就没有信息 —— 所以救援系统必须自己留证据
+
+前两次失败我**一点信息都拿不到**（没串口、没网、只能请人看屏幕）。
+加上 `gk3-diag` 之后，它在 default runlevel 末尾把
+`rc-status --all` / 挂载表 / 网络 / `sshd -T` 生效配置 / `dmesg` / 系统日志
+**写回启动介质**（临时 remount rw）。下次进 Android 挂上 p3 就能读。
+**这一条比这次修好的那个 bug 值钱。**
+
+### 顺带修掉的三件
+
+* `need localmount` → `after localmount`。`need` 是硬依赖，目标不在 runlevel
+  里就**静默不启动**；`gk3-wifi` 与 `gk3-sshd` 共用这条，正好一起哑掉。
+  而我们的根是只读 squashfs + tmpfs，**压根没有东西要挂**。
+* `rc-status` 把一个**正常工作的** `gk3-wifi` 报成 `[crashed]`
+  —— 没把 `pidfile` 声明给 OpenRC。救援系统里一个会说谎的 status 比没有更糟。
+* `gk3_probe` 把 1007 KiB 的 misc 分区报成 `0 MiB`（整数除法）。
+  合成数据里没有这种小分区，**只有真实磁盘能发现**。
+
+### ✅ 安装器后端在真实磁盘上验过
+
+站在救援系统里直接跑 `gk3_probe` / `gk3_plan`：
+
+* 8 个分区、类型 GUID、文件系统、PARTLABEL 全对
+* 认出那块 **63.9 GiB 的空闲区**（boot_b 与 metadata 之间）
+* **双系统方案**用真实空闲区算出来严丝合缝：起于 814606336、止于 948561919，
+  不重叠不越界，复用现有 ESP，`/data` 拿到 50.7 GiB
+
+⇒ "在已有系统旁边装 Android"这条路，**在这台机器上是算得出来的**。

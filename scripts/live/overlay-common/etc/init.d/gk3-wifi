@@ -11,6 +11,10 @@
 #   焊死在只读的 squashfs 里（换了 WiFi 就得重造镜像）。
 
 description="gaokun3 WiFi (wpa_supplicant + dhcpcd)"
+# 必须把 pidfile 声明给 OpenRC，否则 rc-status 会把一个【正在好好工作的】
+# 服务显示成 crashed —— 实测：WiFi 明明连着、IP 也拿到了，rc-status 却报
+# [crashed]。救援系统里一个会说谎的 status 比没有更糟。
+pidfile="/run/wpa_supplicant.pid"
 IFACE=wlan0
 MEDIA_CONF=/media/gk3/gaokun3/wpa_supplicant.conf
 IMAGE_CONF=/etc/wpa_supplicant/wpa_supplicant.conf
@@ -67,9 +71,10 @@ start() {
     fi
     ebegin "启动 WiFi（配置来自 $CONF）"
     ip link set "$IFACE" up
-    start-stop-daemon --start --background --make-pidfile \
-        --pidfile /run/wpa_supplicant.pid \
-        --exec /sbin/wpa_supplicant -- -i "$IFACE" -c "$CONF"
+    # 让 wpa_supplicant 自己 daemonize(-B) 并自己写 pidfile(-P)：
+    # 比 start-stop-daemon 的 --background --make-pidfile 可靠 ——
+    # 后者记的是它 fork 出来那个壳的 pid，不一定是最终的守护进程。
+    /sbin/wpa_supplicant -B -i "$IFACE" -c "$CONF" -P "$pidfile"
     # dhcpcd 自己会等载波，不用我们轮询
     start-stop-daemon --start --background --exec /sbin/dhcpcd -- -b "$IFACE"
     eend 0
@@ -77,7 +82,7 @@ start() {
 
 stop() {
     ebegin "停 WiFi"
-    start-stop-daemon --stop --quiet --pidfile /run/wpa_supplicant.pid 2>/dev/null
+    start-stop-daemon --stop --quiet --pidfile "$pidfile" 2>/dev/null
     /sbin/dhcpcd -k "$IFACE" 2>/dev/null
     eend 0
 }

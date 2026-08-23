@@ -86,7 +86,11 @@ gk3__probe_parts() {
         pname=$(sgdisk -i "$num" "$disk" 2>/dev/null | sed -n "s/^Partition name: '\(.*\)'/\1/p")
         fstype=$(blkid -o value -s TYPE "$part" 2>/dev/null || echo "")
         fslabel=$(blkid -o value -s LABEL "$part" 2>/dev/null || echo "")
-        echo "PART path=$part num=$num start=$start end=$end size_mib=$(( (end - start + 1) / 2048 ))" \
+        # 也报 KiB：本机 misc 只有 1007 KiB（GPT 头之后那段闲置空间），
+        # 只报 MiB 会显示成 "0 MiB"，界面上看着像个空分区。
+        # 实测发现的 —— 合成数据里没有这种小分区。
+        echo "PART path=$part num=$num start=$start end=$end" \
+             "size_mib=$(( (end - start + 1) / 2048 )) size_kib=$(( (end - start + 1) / 2 ))" \
              "type=${ptype:-?} name=${pname:-} fs=${fstype:-} fslabel=${fslabel:-}" \
              "os=$(gk3__guess_os "$part" "$ptype" "$pname" "$fstype")"
         cursor=$(( end + 1 ))

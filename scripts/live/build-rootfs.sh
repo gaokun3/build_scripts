@@ -232,6 +232,11 @@ else
     echo "   ⚠️ 没给 --sdboot —— 安装器将无法给目标机装引导链"
 fi
 
+# ---- 6b. 安装器后端 --------------------------------------------------------
+# 图形安装器与命令行安装器共用它。放进镜像，图形前端默认从这里加载。
+install -Dm644 "$LIVE/installer-lib.sh" "$ROOTFS/usr/share/gaokun3/installer-lib.sh"
+ok "带上了安装器后端 installer-lib.sh"
+
 # ---- 7. 断言（在做成 squashfs 之前，别把坏镜像做出来）--------------------
 say "4. 体检"
 # ⚠️★ 必须在 chroot 【里面】查。第一版在外面 `[ -e $ROOTFS/sbin/init ]`，
@@ -281,6 +286,7 @@ need_path /etc/init.d/gk3-wifi
 need_path /etc/runlevels/default/gk3-wifi
 need_path /etc/runlevels/default/gk3-sshd
 need_path /etc/runlevels/default/gk3-diag  # 没网时唯一的取证通路
+need_path /usr/share/gaokun3/installer-lib.sh
 need_path /etc/runlevels/boot/localmount     # gk3-* 排在它后面；缺了会打乱顺序
 need_path /etc/runlevels/sysinit/devfs
 # ★ 断言两个服务【没有】硬依赖：`need` 一旦指向不存在的服务，
