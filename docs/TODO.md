@@ -239,21 +239,16 @@ mock 报的 skin/battery SHUTDOWN 阈值只有 **36 °C**，而
 （只是继续收不到 fault）。做成之后可以丢掉常驻的 `smmu-nostall.sh` 轮询。
 
 ### B7. 用轻量系统替掉救援 Ubuntu（★ 与 B4 是同一件事）
-**M0 已完成**：构建链跑通，产物 squashfs **55 MiB** + initramfs **648 KiB**
-（`scripts/live/`）。⬜ **还没在硬件上启动过** —— 下一步是从救援 Ubuntu 里
-用未分配的 64 GiB 建一个 1 GiB 分区、并列加一个启动项，ssh 验过再谈删 p3。
+**★ M0 完成（2026-08-23）**：Alpine 救援系统已在硬件上跑起来 ——
+ssh 可达、WiFi 自动连上、全套分区工具就位、`lsblk` 看得见内置盘 8 个分区。
+案卷 [stage7-live-installer.md](stage7-live-installer.md)。
 
-现在 24.6 GiB 一整套 Ubuntu。设计见 [stage7-live-installer.md](stage7-live-installer.md)：
-**救援系统不再是一个分区** —— 内核 + initramfs + 一个 ≤120 MiB 的 squashfs，
-和 LiveCD 用同一套镜像（两个 profile）。
+产物：squashfs **55 MiB** + initramfs **2.7 MiB**（含 WCN6855 固件）。
+它要替掉的是 **24.6 GiB** 的 Ubuntu 分区。
 
-★ 顺带把 ESP 上那份**独立的救援内核 + initrd（59 MiB）** 也省掉：
-救援与 Android **共用同一个内核**，只是换 initramfs 和 cmdline。
-为此已经在 `kernel-config-android.sh` 里补了 `SQUASHFS=y`（原本是 `=m`）、
-`NTFS3_FS=y`、`NLS_UTF8=y`。
-
-⚠️ 迁移顺序：**先并列装上、ssh 验过真活儿，才删 p3。**
-别把唯一的救援通路换成没验过的东西。
+⬜ **还没删 p3**，因为现在 squashfs 就放在 p3 上（验证期故意不动分区表）。
+下一步：按设计建 1 GiB 的 `gk3rescue` 分区、把 squashfs 挪过去、
+确认能启动之后再回收那 24.6 GiB。
 
 ### B8. `invalid volume index range in the curve` ×12（既有，非回归）
 每次 audioserver 启动都吐 12 条 `E APM_AudioPolicyManager: invalid volume index
