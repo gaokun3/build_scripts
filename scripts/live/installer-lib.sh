@@ -83,7 +83,7 @@ gk3__probe_parts() {
         local part; part=$(gk3_partpath "$disk" "$num")
         local ptype pname fstype fslabel
         ptype=$(sgdisk -i "$num" "$disk" 2>/dev/null | sed -n 's/^Partition GUID code: \([0-9A-Fa-f-]*\).*/\1/p')
-        pname=$(sgdisk -i "$num" "$disk" 2>/dev/null | sed -n "s/^Partition name: '\(.*\)'/\1/p")
+        pname=$(sgdisk -i "$num" "$disk" 2>/dev/null | grep "^Partition name:" | cut -d"'" -f2)
         fstype=$(blkid -o value -s TYPE "$part" 2>/dev/null || echo "")
         fslabel=$(blkid -o value -s LABEL "$part" 2>/dev/null || echo "")
         # 也报 KiB：本机 misc 只有 1007 KiB（GPT 头之后那段闲置空间），
@@ -176,6 +176,37 @@ gk3_plan() {
         esac
     done
     [ -n "$disk" ] || { echo "PLANERR msg=no-disk"; return 1; }
+
+    # ⚠️★ ① 分区名查重。Android 的 first-stage mount 走 by-name/super，那是
+    #   ueventd 按 PARTLABEL 建的符号链接 —— 重名时哪个赢【不确定】。在一块
+    #   已经装过我们系统的盘上跑 alongside，就会建出第二个 super、第二个
+    #   userdata，然后开机随机挂错分区。整盘模式不用查（分区表会被清空）。
+    #   ⚠️ 取名字用 cut 不用 sed 反捕获 —— 第一版用了 sed 的反向引用，那个
+    #      反斜杠在写文件的路上被吃成 0x01 控制字符，于是守卫看着在那儿
+    #      却从不触发。实机验出来的。
+    if [ "$mode" != wipe ] && command -v sgdisk >/dev/null; then
+        local dup="" nm n
+        for n in $(sgdisk -p "$disk" 2>/dev/null | awk '/^ *[0-9]+ /{print $1}'); do
+            nm=$(sgdisk -i "$n" "$disk" 2>/dev/null | grep "^Partition name:" | cut -d"'" -f2)
+            [ "$nm" = esp ] && continue
+            case " misc metadata boot_a boot_b super userdata gk3rescue " in
+                *" $nm "*) dup="$dup $nm" ;;
+            esac
+        done
+        if [ -n "$dup" ]; then
+            echo "PLANERR msg=partlabel-conflict names=$(echo $dup | tr " " ",")"
+            return 1
+        fi
+    fi
+
+    # ⚠️★ ⑤ MBR 盘。sgdisk 会把 MBR 盘【静默转成 GPT】，原布局当场没了。
+    #   老 Windows 装机大多是 MBR，所以这不是理论风险。
+    if command -v sgdisk >/dev/null; then
+        if sgdisk -p "$disk" 2>&1 | grep -qi "MBR only"; then
+            echo "PLANERR msg=mbr-disk"
+            return 1
+        fi
+    fi
 
     local cur last
     if [ "$mode" = wipe ]; then
@@ -328,6 +359,23 @@ gk3_apply() {
     printf '%s\n' "$plan" | grep -q '^PLANERR' && { printf '%s\n' "$plan" | grep '^PLANERR'; return 1; }
 
     # ── 建分区 ──────────────────────────────────────────────────────────
+    # ⚠️★ ④ 动手之前先把分区表备份到介质上。出事能一条命令还原：
+    #     sgdisk --load-backup=<文件> <盘>
+    #   代价是几十 KB 和一秒钟；没有它的话，改错分区表就只能靠猜。
+    if [ "${GK3_DRYRUN:-0}" != 1 ]; then
+        local bkdir bk
+        bkdir=/media/gk3/gaokun3
+        mount -o remount,rw /media/gk3 2>/dev/null || true
+        [ -d "$bkdir" ] || bkdir=/tmp
+        bk="$bkdir/gpt-backup-$(basename "$disk")-$(date +%Y%m%d-%H%M%S).bin"
+        if sgdisk --backup="$bk" "$disk" >/dev/null 2>&1; then
+            echo "分区表已备份到 $bk（还原：sgdisk --load-backup=$bk $disk）"
+        else
+            echo "警告：分区表备份失败（继续，但出事就没有还原点了）"
+        fi
+        sync
+    fi
+
     gk3_prog 5 "写分区表"
     if printf '%s\n' "$plan" | grep -q '^PLAN op=wipe'; then
         gk3__run sgdisk --zap-all "$disk" || return 1
@@ -367,6 +415,25 @@ EOF
         gk3__run mkfs.vfat -F 32 -n ESP "$p_esp" || return 1
     else
         p_esp=$esp    # 复用现有 ESP，绝不格式化它
+        # ⚠️★ ② 真的去量它有多少空闲。原先只在 plan 里打一行 need_mib=150
+        #   却从不验证 —— 不够的话分区表已经改完、super 已经写完，然后死在
+        #   装引导链那一步，留下一块半装的盘。
+        if [ "${GK3_DRYRUN:-0}" != 1 ]; then
+            local em fm; em=$(mktemp -d)
+            if mount -t vfat "$p_esp" "$em" 2>/dev/null; then
+                fm=$(df -m "$em" | awk "NR==2{print \$4}")
+                umount "$em"; rmdir "$em" 2>/dev/null
+                echo "现有 ESP $p_esp 空闲 ${fm} MiB（需要 ${GK3_ESP_NEED_MIB}）"
+                if [ "${fm:-0}" -lt "$GK3_ESP_NEED_MIB" ]; then
+                    gk3_die "ESP 空间不够：只有 ${fm} MiB，需要 ${GK3_ESP_NEED_MIB} MiB。请先在原系统里清理 EFI 分区。"
+                    return 1
+                fi
+            else
+                rmdir "$em" 2>/dev/null
+                gk3_die "挂不上现有 ESP $p_esp —— 不敢往一个读不了的 ESP 上装引导链"
+                return 1
+            fi
+        fi
         echo "复用现有 ESP：$p_esp（不格式化）"
     fi
     gk3__run mkfs.ext4 -q -F -L metadata "$p_meta" || return 1
@@ -514,7 +581,7 @@ gk3__f() {
 gk3__bylabel() {
     local disk=$1 want=$2 n
     for n in $(sgdisk -p "$disk" 2>/dev/null | awk '/^ *[0-9]+ /{print $1}'); do
-        if [ "$(sgdisk -i "$n" "$disk" 2>/dev/null | sed -n "s/^Partition name: '\(.*\)'/\1/p")" = "$want" ]; then
+        if [ "$(sgdisk -i "$n" "$disk" 2>/dev/null | grep "^Partition name:" | cut -d"'" -f2)" = "$want" ]; then
             gk3_partpath "$disk" "$n"; return 0
         fi
     done
