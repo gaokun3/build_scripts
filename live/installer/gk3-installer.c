@@ -333,7 +333,8 @@ static void sc_confirm(cairo_t *cr, App *a)
                  p->os[0] ? p->os : "-", p->name[0] ? p->name : (p->fs[0] ? p->fs : "-"));
             y += 30; shown++;
         }
-        if (shown == 0) text(cr, 96, y, 900, 16, C_MUTED, "left", "（这块盘上目前没有分区）");
+        if (shown == 0) { text(cr, 96, y, 900, 16, C_MUTED, "left", "（这块盘上目前没有分区）"); y += 30; }
+        if (shown >= 6) { text(cr, 96, y, 900, 15, C_MUTED, "left", "…以及其余分区"); y += 30; }
     } else {
         text(cr, 64, 180, UI_W - 128, 22, C_OK, "left",
              "现有分区【一个都不会动】。只使用空闲空间。");
@@ -344,8 +345,11 @@ static void sc_confirm(cairo_t *cr, App *a)
     text(cr, 64, 470, UI_W - 128, 17, C_MUTED, "left",
          "救援系统：%s", a->want_rescue ? "安装" : "不安装");
 
-    /* 按住确认 —— 触摸屏上单击太容易误触，而这一步不可撤销 */
-    double bx = 64, by = UI_H - 160, bw = UI_W - 128, bh = 96;
+    /* 按住确认 —— 触摸屏上单击太容易误触，而这一步不可撤销。
+     * ⚠️ "返回"和确认条【必须同一行、隔开】：第一版把返回摞在确认条正上方，
+     *    离屏幕最危险的那个控件只有几像素，手指按下去很容易滑到下面那个。 */
+    button(cr, 64, UI_H - 160, 200, 96, "返回", ID_BACK, false, true, false);
+    double bx = 300, by = UI_H - 160, bw = UI_W - 364, bh = 96;
     rrect(cr, bx, by, bw, bh, 16); set_col(cr, C_SURF2); cairo_fill(cr);
     if (a->hold > 0) {
         cairo_save(cr); rrect(cr, bx, by, bw, bh, 16); cairo_clip(cr);
@@ -354,10 +358,11 @@ static void sc_confirm(cairo_t *cr, App *a)
     }
     rrect(cr, bx, by, bw, bh, 16); set_col(cr, C_DANGER);
     cairo_set_line_width(cr, 3); cairo_stroke(cr);
-    text(cr, bx, by + 34, bw, 22, C_TEXT, "center",
-         a->hold > 0 ? "按住不放…… %d%%" : "按住 2 秒开始安装", (int)(a->hold * 100));
+    if (a->hold > 0)
+        text(cr, bx, by + 34, bw, 22, C_TEXT, "center", "按住不放…… %d%%", (int)(a->hold * 100));
+    else
+        text(cr, bx, by + 34, bw, 22, C_TEXT, "center", "按住 2 秒开始安装");
     hit_add(bx, by, bw, bh, ID_CONFIRM_HOLD, true);
-    button(cr, 64, 560, 200, 72, "返回", ID_BACK, false, true, false);
 }
 
 static void sc_run(cairo_t *cr, App *a)
