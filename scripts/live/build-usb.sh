@@ -16,7 +16,7 @@
 # 写盘： sudo dd if=gaokun3-live.img of=/dev/sdX bs=4M conv=fsync status=progress
 set -euo pipefail
 
-SQUASH=; INITRAMFS=; KERNEL=; DTB=; SDBOOT=; PAYLOAD=; OUT=; SIZE_MIB=
+SQUASH=; INITRAMFS=; KERNEL=; DTB=; SDBOOT=; PAYLOAD=; OUT=; SIZE_MIB=; WIFI=
 die() { echo "!! $*" >&2; exit 1; }
 say() { echo; echo "══ $*"; }
 ok()  { echo "   ✓ $*"; }
@@ -29,6 +29,7 @@ while [ $# -gt 0 ]; do
         --dtb)       DTB=$2; shift 2 ;;
         --sdboot)    SDBOOT=$2; shift 2 ;;
         --payload)   PAYLOAD=$2; shift 2 ;;
+        --wifi-conf) WIFI=$2; shift 2 ;;
         --size)      SIZE_MIB=$2; shift 2 ;;
         --out)       OUT=$2; shift 2 ;;
         *) die "不认识的参数：$1" ;;
@@ -97,6 +98,16 @@ if [ -n "$PAYLOAD" ]; then
         M "$f" "::/gaokun3/payload/$(basename "$f")"
     done
     ok "带上了安装载荷（$(ls -1 "$PAYLOAD" | wc -l) 个文件）"
+fi
+
+# WiFi 凭据（可选）。放在【介质】上而不是镜像里 —— 公开发布的 LiveCD
+# 一个字都不带，而自用的这根 U 盘带上就能开机自动联网、方便远程调试。
+# ⚠️ 本仓不收这个文件。
+if [ -n "$WIFI" ]; then
+    [ -f "$WIFI" ] || die "--wifi-conf 指的文件不在：$WIFI"
+    grep -q 'network=' "$WIFI" || die "$WIFI 不像 wpa_supplicant 配置"
+    M "$WIFI" ::/gaokun3/wpa_supplicant.conf
+    ok "带上了 WiFi 配置（$(grep -c 'network=' "$WIFI") 个网络）"
 fi
 
 TMP=$(mktemp)

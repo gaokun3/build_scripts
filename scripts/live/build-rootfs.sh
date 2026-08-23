@@ -131,7 +131,11 @@ copy_overlay "$LIVE/overlay-common"
 [ "$PROFILE" = rescue ] && copy_overlay "$LIVE/overlay-rescue"
 [ "$PROFILE" = live ]   && copy_overlay "$LIVE/overlay-live"
 
-echo "gaokun3-rescue" > "$ROOTFS/etc/hostname"
+if [ "$PROFILE" = live ]; then
+    echo "gaokun3-live" > "$ROOTFS/etc/hostname"
+else
+    echo "gaokun3-rescue" > "$ROOTFS/etc/hostname"
+fi
 
 # ★ 开机自启：不用 rc-update（要跑目标架构的脚本），直接建符号链接。
 #   OpenRC 的 runlevel 就是一堆指向 /etc/init.d/* 的符号链接，没有别的状态。
@@ -156,6 +160,18 @@ echo "   ── boot   : $(ls "$ROOTFS/etc/runlevels/boot"    2>/dev/null | tr '
 ' ' ')"
 echo "   ── default: $(ls "$ROOTFS/etc/runlevels/default" 2>/dev/null | tr '
 ' ' ')"
+
+# ---- 4b. LiveCD 的 tty1 接线 ----------------------------------------------
+# ⚠️★ 第一版把安装器编进了镜像却【没有任何东西去拉起它】，实机启动后停在
+#    login 提示符。镜像里有个二进制不等于它会跑 —— 这一步就是那根线。
+if [ "$PROFILE" = live ]; then
+    [ -f "$ROOTFS/etc/inittab" ] || die "镜像里没有 /etc/inittab"
+    # tty1 交给安装器；tty2 留一个 getty 当逃生口
+    sed -i 's|^tty1::respawn:.*|tty1::respawn:/usr/bin/gk3-installer-session|' "$ROOTFS/etc/inittab"
+    grep -q 'gk3-installer-session' "$ROOTFS/etc/inittab" || die "inittab 的 tty1 行没改上（上游格式变了？）"
+    grep -q '^tty2::respawn:' "$ROOTFS/etc/inittab" ||         echo 'tty2::respawn:/sbin/getty 38400 tty2' >> "$ROOTFS/etc/inittab"
+    ok "tty1 交给图形安装器，tty2 留了 getty"
+fi
 
 # ---- 5. ssh 公钥 ----------------------------------------------------------
 if [ -n "$SSH_KEY" ]; then
@@ -331,6 +347,9 @@ if [ "$PROFILE" = live ]; then
     need_glob '/usr/lib/libinput.so.*'
     need_glob '/usr/share/fonts/*/wqy*' '/usr/share/fonts/wqy*/*'
     need_path /usr/bin/gk3-installer   # 没有它 LiveCD 就只是个救援系统
+    need_path /usr/bin/gk3-installer-session
+    # ★ 断言那根线真的接上了 —— 二进制在镜像里不等于它会跑
+    if in_ch 'grep -q gk3-installer-session /etc/inittab'; then ok 'inittab 的 tty1 指向安装器'; else echo '   ✗ inittab 没接安装器'; BAD=1; fi
 fi
 [ $BAD -eq 0 ] || die "体检没过 —— 不出镜像。上面缺的东西要么包名错了，要么 apk 装失败被吞了。"
 

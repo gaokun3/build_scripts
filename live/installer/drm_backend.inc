@@ -14,6 +14,8 @@
 #include <xf86drmMode.h>
 #include <libinput.h>
 #include <libudev.h>
+#include <linux/kd.h>
+#include <sys/ioctl.h>
 
 typedef struct {
     int fd;
@@ -28,10 +30,24 @@ typedef struct {
 /* 面板是 1600x2560 竖屏，平板横着用 —— 逻辑坐标 1280x800 旋转 90° 再铺满。
  * ⚠️ 这个逆变换和 drm_present() 里的 cairo 变换【必须成对改】，
  *    否则手指点 A 处、程序以为点了 B 处，而且这种错很难从截图上看出来。 */
+/*   渲染变换：translate(W,0) → rotate(90) → scale(sx,sy)
+ *   逻辑点 (lx,ly) 落到设备上是 (W - sy*ly, sx*lx)，于是
+ *       lx ∈ [0,UI_W] 映到设备 y ∈ [0,H]  ⇒  sx = H/UI_W
+ *       ly ∈ [0,UI_H] 映到设备 x ∈ [0,W]  ⇒  sy = W/UI_H
+ *
+ * ⚠️★ 第一版写成了 scale(H/UI_H, W/UI_W) —— 把"哪个逻辑轴对应哪个设备轴"
+ *    搞反了。本机上那是 (3.2, 1.25)：横向拉伸 3.2 倍、纵向压到 1.25 倍。
+ *    ★ 一个 bug 两个症状：**布局烂**和**触摸偏**是同一个错误的两面，
+ *      因为逆变换里我犯了一模一样的错。用户报"触摸是坏的，布局是烂的"，
+ *      听起来像两件事，其实只有一件。
+ */
+#define GK3_SX(d) ((double)(d)->height / UI_W)
+#define GK3_SY(d) ((double)(d)->width  / UI_H)
+
 static void drm_to_logical(Drm *d, double dx, double dy, double *lx, double *ly)
 {
-    *lx = dy / ((double)d->height / UI_H);
-    *ly = ((double)d->width - dx) / ((double)d->width / UI_W);
+    *lx = dy / GK3_SX(d);
+    *ly = ((double)d->width - dx) / GK3_SY(d);
 }
 
 static int drm_open(Drm *d)
@@ -49,6 +65,9 @@ static int drm_open(Drm *d)
             if (!conn) continue;
             if (conn->connection == DRM_MODE_CONNECTED && conn->count_modes > 0) {
                 d->fd = fd; d->conn_id = conn->connector_id; d->mode = conn->modes[0];
+                /* 从 getty 起来时我们不是 DRM master，setCrtc 会 EACCES */
+                if (drmSetMaster(fd) != 0)
+                    fprintf(stderr, "[gk3] drmSetMaster: %s\n", strerror(errno));
                 drmModeEncoder *enc = conn->encoder_id ? drmModeGetEncoder(fd, conn->encoder_id) : NULL;
                 d->crtc_id = (enc && enc->crtc_id) ? enc->crtc_id : (uint32_t)res->crtcs[0];
                 if (enc) drmModeFreeEncoder(enc);
@@ -98,7 +117,7 @@ static void drm_present(Drm *d, App *a)
     cairo_t *cr = cairo_create(s);
     cairo_translate(cr, d->width, 0);
     cairo_rotate(cr, M_PI / 2);
-    cairo_scale(cr, (double)d->height / UI_H, (double)d->width / UI_W);
+    cairo_scale(cr, GK3_SX(d), GK3_SY(d));   /* 与 drm_to_logical 成对，别单改一边 */
     draw(cr, a);
     cairo_destroy(cr);
     cairo_surface_flush(s);
@@ -172,11 +191,25 @@ static void run_install(App *a, Drm *d)
     drm_present(d, a);
 }
 
+/* 把控制台切到图形模式，否则 fbcon 会继续往我们画的画面上打字。
+ * 退出时要切回来，不然用户回到的是一块黑屏。 */
+static int g_vt = -1;
+static void vt_graphics(int on);
+static void vt_graphics_off(void) { vt_graphics(0); }
+static void vt_graphics(int on)
+{
+    if (g_vt < 0) g_vt = open("/dev/tty1", O_RDWR | O_CLOEXEC);
+    if (g_vt < 0) g_vt = open("/dev/tty0", O_RDWR | O_CLOEXEC);
+    if (g_vt >= 0) ioctl(g_vt, KDSETMODE, on ? KD_GRAPHICS : KD_TEXT);
+}
+
 static int run_drm(void)
 {
     Drm d;
     memset(&d, 0, sizeof d);
     if (drm_open(&d) || drm_make_fb(&d)) return 1;
+    vt_graphics(1);
+    atexit(vt_graphics_off);
 
     struct udev *ud = udev_new();
     struct libinput *li = libinput_udev_create_context(&LI_IFACE, NULL, ud);
