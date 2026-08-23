@@ -327,13 +327,19 @@ ok "留下 busybox.static 给 initramfs 用"
 #   2026-08-23 上机现象：救援系统起来了但"网卡起不来"。
 #   Android 那边能成，是因为 ueventd 实现了内核的固件用户态助手；
 #   我们的 initramfs 里没有任何东西干这件事，所以固件必须【直接在里面】。
+# ⚠️ 只带本机真正用得到的那颗芯片。整个 ath11k 目录有 7 款芯片、约 23 MiB，
+#    而 initramfs 要放进只剩几十 MB 的 ESP —— 收窄到 WCN6855 只要约 3 MiB。
+#    换机器就改这个变量（gaokun3 是 WCN6855，实测 hw2.0 与 hw2.1 都要带：
+#    驱动会按 board id 选，事先说不准是哪一个）。
+FW_CHIPS=${FW_CHIPS:-ath11k/WCN6855}
 rm -rf "$OUT/fw"; mkdir -p "$OUT/fw/lib/firmware"
-if [ -d "$ROOTFS/lib/firmware/ath11k" ]; then
-    cp -a "$ROOTFS/lib/firmware/ath11k" "$OUT/fw/lib/firmware/"
-    ok "留下 ath11k 固件给 initramfs（$(du -sh "$OUT/fw" | cut -f1)）"
-else
-    die "rootfs 里没有 /lib/firmware/ath11k —— initramfs 会造出一个没网的救援系统"
-fi
+for chip in $FW_CHIPS; do
+    src=$ROOTFS/lib/firmware/$chip
+    [ -d "$src" ] || die "rootfs 里没有 /lib/firmware/$chip —— initramfs 会造出一个没网的救援系统"
+    mkdir -p "$OUT/fw/lib/firmware/$(dirname "$chip")"
+    cp -a "$src" "$OUT/fw/lib/firmware/$(dirname "$chip")/"
+done
+ok "留下固件给 initramfs：$FW_CHIPS（$(du -sh "$OUT/fw" | cut -f1)）"
 
 SQUASH=$OUT/gaokun3-$PROFILE.squashfs
 rm -f "$SQUASH"
