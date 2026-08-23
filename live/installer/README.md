@@ -40,9 +40,35 @@ make drm        # 设备构建（在 Alpine chroot 里）
 * 字体写 `Sans` 交给 fontconfig（镜像里装了 wqy-zenhei，中文自动回退）。
   写死字体名会在换字体包时静默变成方框。
 
-## 状态
+## 状态（2026-08-23）
 
-* ✅ 七屏 + 离线渲染
-* ✅ 后端 probe/plan + 自测
-* ⬜ DRM/libinput 后端（写了但没上过机）
-* ⬜ `gk3_apply`（真正写盘那一半）
+| | |
+|---|---|
+| 七屏 + 离线 PNG 渲染 | ✅ 编译通过，逐屏看过 |
+| 后端 `gk3_probe` / `gk3_plan` | ✅ 离线自测 8/8 **+ 真实磁盘上验过** |
+| 后端 `gk3_apply`（真写盘） | ✅ **loop 设备端到端验过**（见下） |
+| DRM + libinput 后端 | ✅ 编译通过（aarch64 chroot 内） |
+| 编入 live 镜像 | ✅ `/usr/bin/gk3-installer`，镜像 75 MiB |
+| 完整 LiveCD U 盘镜像 | ✅ 187 MB，6 个必需文件校验通过 |
+| **在真机上跑一次** | ⬜ **还没有** |
+
+### `gk3_apply` 的端到端验证
+
+在构建机上用 loop 设备造一块 40 GiB 的假盘，真跑一遍：
+
+* 8 个分区按方案落地，`sgdisk -p` 逐行对得上
+* ESP=vfat、metadata/gk3rescue/userdata=ext4
+* **`super` 与源文件 sha256 一致**、`boot_a`/`boot_b` 都对、`misc` 全零
+* ESP 里引导链齐全：`BOOTAA64.EFI`、两个 Android 启动项、救援启动项、
+  两个槽位各自的内核/dtb/ramdisk
+* 救援分区里有 squashfs 与 WiFi 配置
+
+### ⚠️ 这一轮抓到的三个真 bug（都是实测抓的，不是想出来的）
+
+1. **分区节点解析成空串就往下走** —— `partprobe` 之后节点是异步出现的，
+   拿到空路径会变成 `dd of=` / `mkfs.ext4 -F ""`，而此时分区表已经写下去了。
+   ★ 修法不是"判死"而是"等它"：**"还没出现"和"不存在"是两回事**。
+2. **`| tail` 吞掉退出码** —— 测试脚本报 `APPLY_RC=0` 而其实失败了。
+   本仓在 `make | tail` 上记过同一个坑，这次是我自己在测试里复发的。
+3. **公开 live 镜像不该有公钥，而我把它写成了无条件断言** —— 于是
+   live 构建必然失败。断言本身要区分 profile。
