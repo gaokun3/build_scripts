@@ -315,7 +315,10 @@ else ok "gk3-* 只用 after 排序依赖，没有 need"; fi
 # ★ 这条断言的由来见上面第 5 步：root 锁着的话，公钥、权限、配置全对也登不进去，
 #   而症状（Permission denied + 通告了 password）会把人引向完全错误的方向。
 if in_ch 'grep -q "^root::" /etc/shadow'; then ok "root 账户未锁定"; else echo "   ✗ root 账户是锁定的 —— ssh 公钥登录会被直接拒绝"; BAD=1; fi
-need_path /root/.ssh/authorized_keys
+# ⚠️ 只有给了 --ssh-key 才该有它。公开发布的 live 镜像【故意不带任何人的公钥】——
+#    带了等于所有人共用一把钥匙。第一版把它写成无条件断言，于是 live 构建必然失败。
+if [ -n "$SSH_KEY" ]; then need_path /root/.ssh/authorized_keys; else
+    ok "没装公钥（live 镜像本该如此）"; fi
 # ★ ath11k 固件：没有它 wlan0 根本不出现，而"没网"在这台机器上等于"救援失效"。
 #   ⚠️ 不写死目录 —— linux-firmware 在 /lib 还是 /usr/lib、压不压缩，各版本不同。
 # ★ Alpine 的固件是 .zst 压缩的 —— 通配符必须带 *。
@@ -327,6 +330,7 @@ if [ "$PROFILE" = live ]; then
     need_glob '/usr/lib/libcairo.so.*'
     need_glob '/usr/lib/libinput.so.*'
     need_glob '/usr/share/fonts/*/wqy*' '/usr/share/fonts/wqy*/*'
+    need_path /usr/bin/gk3-installer   # 没有它 LiveCD 就只是个救援系统
 fi
 [ $BAD -eq 0 ] || die "体检没过 —— 不出镜像。上面缺的东西要么包名错了，要么 apk 装失败被吞了。"
 
