@@ -5,7 +5,7 @@
 在华为 MateBook E Go（Snapdragon 8cx Gen 3 / sc8280xp，代号 gaokun）上跑原生 AOSP，
 最终目标是能稳定运行 arm64 手游。
 
-**当前阶段：Stage 6 M20 — ★★★★ 一次装机把两件大事落地（构建戳 `1787436126`，slot_a）：**① root 随 ROM 常驻**（ReSukiSU，`verify-root.sh` 8/8，postinstall 写进 slot_a 的内核与手工验过的 sha256 逐字节相同）；**② SELinux 四步走完** —— `init` 域里只剩 PID 1，`network_stack` 236→0、`hal_health_default` 235→0（**四条 genfscon，零 allow 规则**），第 4 步规则按真实主体写完并通过 `sepolicy_neverallows`。功能零回归（传感器/声卡/WiFi/root）。⚠️ **仍是 permissive**：转 enforcing 还卡在两个加规则解决不了的东西（hangdump 的 debugfs neverallow 无 userdebug 豁免；smmustall 要 `/dev/mem`，正解是先做 B6）。Stage 7 M0：救援镜像 55 MiB + initramfs 648 KiB，**initramfs 与失败自救路径已上机验过**（120s vs 45s 基线），完整启动（OpenRC→WiFi→ssh）**留给用户在场时做** —— 这机器只有 WiFi，起来但连不上就要人按电源键。（每次开工时更新这一行）
+**当前阶段：Stage 6 M20 — ★★★★ 一次装机把两件大事落地（构建戳 `1787436126`，slot_a）：**① root 随 ROM 常驻**（ReSukiSU，`verify-root.sh` 8/8，postinstall 写进 slot_a 的内核与手工验过的 sha256 逐字节相同）；**② SELinux 四步走完** —— `init` 域里只剩 PID 1，`network_stack` 236→0、`hal_health_default` 235→0（**四条 genfscon，零 allow 规则**），第 4 步规则按真实主体写完并通过 `sepolicy_neverallows`。功能零回归（传感器/声卡/WiFi/root）。⚠️ **仍是 permissive**：转 enforcing 还卡在两个加规则解决不了的东西（hangdump 的 debugfs neverallow 无 userdebug 豁免；smmustall 要 `/dev/mem`，正解是先做 B6）。**★ Stage 7 M0 上机完成**：Alpine 救援系统 ssh 可达、WiFi 自动连上、分区工具齐全（squashfs 55 MiB + initramfs 2.7 MiB，替掉 24.6 GiB 的 Ubuntu）。真凶是**内建 ath11k 在 initramfs 阶段拿不到固件**（probe 在 t=1.19s，远早于 switch_root）。安装器后端已在真实磁盘上验过，**双系统方案算得出来**（63.9 GiB 空闲区 → /data 50.7 GiB）；图形安装器七屏已编译并离线渲染检查。⬜ 欠 `gk3_apply`（真写盘）与 DRM 后端。（每次开工时更新这一行）
 
 > **★★★★ Stage 6 M20（2026-08-23 夜，用户睡觉期间）：root 进 ROM + SELinux 四步走完。**
 > 完整案卷 [#76](docs/stage4-findings.md) / [#77](docs/stage4-findings.md)。
