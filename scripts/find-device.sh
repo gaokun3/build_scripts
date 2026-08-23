@@ -15,7 +15,7 @@
 #
 # ★ 现在的判据是【按协议确认身份】，不是看端口开不开、也不是看 MAC：
 #     5555 → adb 连上去问 ro.crdroid.device 是不是 gaokun3
-#     22   → ssh 上去问 hostname 是不是 gaokun3-rescue
+#     22   → ssh 上去问 hostname 是不是 gaokun3-rescue / gaokun3-live
 #   端口和 MAC 只用来【缩小候选范围】，确认永远靠协议。
 #
 # ⚠️ 必须绕开沙箱跑（sandbox 代理会把所有 TCP 连接都答应下来，
@@ -50,7 +50,8 @@ for ip in $CANDS; do
         # ⚠️ 登录失败也是有用的信息：说明那台机器【不是】我们的救援系统，
         #    或者是我们的但公钥没生效 —— 两者要区分，所以把主机名打到 stderr。
         [ -n "$h" ] && echo "  $ip 的 hostname = $h" >&2
-        if [ "$h" = gaokun3-rescue ]; then echo "$ip"; exit 0; fi
+        # rescue profile 叫 gaokun3-rescue，live profile 叫 gaokun3-live
+        case "$h" in gaokun3-rescue|gaokun3-live) echo "$ip"; exit 0 ;; esac
     fi
 done
 echo "!! 扫完 $(echo "$CANDS" | wc -w) 个邻居，没有一台确认是我们的设备（$MODE）" >&2

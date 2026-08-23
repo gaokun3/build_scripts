@@ -143,7 +143,18 @@ fi
 #   minirootfs 是给 chroot 用的，它的 runlevel 基本是空的。
 #   2026-08-23 上机吃过这个亏：只加了自己的服务，结果 localmount 之类根本
 #   不在 runlevel 里。
-for svc in devfs dmesg sysfs hwdrivers; do
+# ★★ udev 对 live profile 是【必需】的，不是可选优化：
+#   libinput 不直接读 evdev —— 它要靠 udev 的 input_id 规则打上的属性
+#   （ID_INPUT / ID_INPUT_TOUCHSCREEN）才知道一个设备是什么，还要
+#   USEC_INITIALIZED 这个"udevd 处理完了"的标记。没有 udevd 就报
+#   "udev device never initialized"，界面画得出来但一个触摸事件都没有。
+#   ⚠️ 我一度以为换成 libinput 的 path 后端就能绕开 udev —— 错的。
+#     path 后端只改变【怎么枚举】，不改变【是否需要设备元数据】。
+#   ⚠️ 设备节点是 devtmpfs 建的，所以 /dev/input/event* 一直都在 ——
+#     "节点存在"很容易被误读成"设备可用"。
+UDEV_SVCS=""
+[ "$PROFILE" = live ] && UDEV_SVCS="udev udev-trigger"
+for svc in devfs dmesg sysfs hwdrivers $UDEV_SVCS; do
     ln -sf "/etc/init.d/$svc" "$ROOTFS/etc/runlevels/sysinit/$svc" 2>/dev/null || true
 done
 mkdir -p "$ROOTFS/etc/runlevels/default" "$ROOTFS/etc/runlevels/boot"
@@ -352,6 +363,9 @@ if [ "$PROFILE" = live ]; then
     need_glob '/usr/share/fonts/*/wqy*' '/usr/share/fonts/wqy*/*'
     need_path /usr/bin/gk3-installer   # 没有它 LiveCD 就只是个救援系统
     need_path /usr/bin/gk3-installer-session
+    # ★ 没有这两个服务，触摸就是死的（见上面第 3 节的说明）
+    need_path /etc/runlevels/sysinit/udev
+    need_path /etc/runlevels/sysinit/udev-trigger
     # ★ 断言那根线真的接上了 —— 二进制在镜像里不等于它会跑
     if in_ch 'grep -q gk3-installer-session /etc/inittab'; then ok 'inittab 的 tty1 指向安装器'; else echo '   ✗ inittab 没接安装器'; BAD=1; fi
 fi
