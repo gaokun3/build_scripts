@@ -226,10 +226,14 @@ static int run_drm(void)
         if (!idev) continue;
         int has_touch = libinput_device_has_capability(idev, LIBINPUT_DEVICE_CAP_TOUCH);
         int has_ptr   = libinput_device_has_capability(idev, LIBINPUT_DEVICE_CAP_POINTER);
+        /* ⚠️ 键盘也要留。上一版只留触摸和指针，把键盘全 remove 掉了 ——
+         *    那样键盘事件永远不会到，而"支持键盘"这件事就无从谈起。 */
+        int has_kbd   = libinput_device_has_capability(idev, LIBINPUT_DEVICE_CAP_KEYBOARD);
         fprintf(stderr, "[gk3] 输入 %s: %s%s%s\n", ipath,
                 libinput_device_get_name(idev),
                 has_touch ? " [触摸]" : "", has_ptr ? " [指针]" : "");
-        if (has_touch || has_ptr) n_in++;
+        if (has_kbd) fprintf(stderr, "[gk3]   ^ 这个还带键盘\n");
+        if (has_touch || has_ptr || has_kbd) n_in++;
         else libinput_path_remove_device(idev);
     }
     if (n_in == 0)
@@ -243,7 +247,7 @@ static int run_drm(void)
     backend("gk3_probe", on_probe, &a);
     if (a.ndisks == 1) a.seldisk = 0;   /* 只有一块盘就直接选中 */
 
-    bool dirty = true, holding = false;
+    bool dirty = true, holding = false, shift_down = false;
     double hold_start = 0;
 
     for (;;) {
@@ -267,6 +271,26 @@ static int run_drm(void)
                 down = true;
             } else if (t == LIBINPUT_EVENT_TOUCH_UP) {
                 up = true;
+            } else if (t == LIBINPUT_EVENT_KEYBOARD_KEY) {
+                struct libinput_event_keyboard *ke = libinput_event_get_keyboard_event(ev);
+                unsigned code = libinput_event_keyboard_get_key(ke);
+                int pressed = (libinput_event_keyboard_get_key_state(ke)
+                               == LIBINPUT_KEY_STATE_PRESSED);
+                if (code == 42 || code == 54) {            /* 左右 Shift */
+                    shift_down = pressed;
+                } else if (pressed) {
+                    int fid = (g_focus >= 0 && g_focus < g_nhits)
+                              ? g_hits[g_focus].id : ID_NONE;
+                    /* ★ 焦点在确认红条上时，按住 Enter 等价于按住红条 ——
+                     *   敲一下就动盘是不可接受的，键盘路径也必须"按住"。 */
+                    if ((code == 28 || code == 96) && fid == ID_CONFIRM_HOLD) {
+                        if (!holding) { holding = true; hold_start = now_s(); }
+                    } else if (ui_key(&a, code, shift_down)) {
+                        dirty = true;
+                    }
+                } else if ((code == 28 || code == 96) && holding) {
+                    holding = false; a.hold = 0; dirty = true;   /* 松开就重来 */
+                }
             }
             if (down && lx >= 0) {
                 int id = hit_test(lx, ly);

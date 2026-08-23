@@ -106,6 +106,11 @@ typedef struct { double x, y, w, h; int id; bool enabled; } Hit;
 static Hit  g_hits[MAX_HITS];
 static int  g_nhits;
 static void hit_reset(void) { g_nhits = 0; }
+
+/* 焦点相关的定义在文件末尾（键盘那一节），这里先声明 */
+typedef struct Field Field;
+static void focus_ring(cairo_t *cr);
+static Field *g_field_focused;   /* 当前有焦点的输入框；没有就是 NULL */
 static void hit_add(double x, double y, double w, double h, int id, bool en)
 {
     if (g_nhits < MAX_HITS) g_hits[g_nhits++] = (Hit){x, y, w, h, id, en};
@@ -273,6 +278,13 @@ enum {
     ID_MODE_WIPE, ID_MODE_ALONG, ID_RESCUE_TOGGLE, ID_CONFIRM_HOLD, ID_REBOOT,
     ID_DISK0 = 100, ID_FREE0 = 200
 };
+
+/* 焦点状态。定义放在这里而不是键盘那一节 —— 因为 run_png() 和
+ * drm_backend.inc 都要用，而它们在文件里都排在前面。
+ * ⚠️ C 是"先声明后使用"，把定义堆在文件末尾会编不过（实测踩了）。 */
+static int  g_focus = -1;      /* g_hits 里的下标；-1 = 没有焦点 */
+static bool g_kbd_used;        /* 用过键盘没有 —— 没用过就不画焦点框 */
+static bool ui_key(App *a, unsigned code, bool shift);
 
 static const char *human(long mib, char *buf, size_t n)
 {
@@ -492,6 +504,9 @@ static void draw(cairo_t *cr, App *a)
         case SC_RUN:     sc_run(cr, a);     break;
         case SC_DONE:    sc_done(cr, a);    break;
     }
+    /* ★ 焦点框画在最后 —— 于是它对每一种控件都自动生效，
+     *   不用去 button()/card()/field_draw() 里各加一遍。 */
+    focus_ring(cr);
 }
 
 /* ── 后端（shell 库）────────────────────────────────────────────────────── */
@@ -715,6 +730,19 @@ static int run_png(const char *dir)
     snprintf(b.disks[0].model, sizeof b.disks[0].model, "空盘");
     b.disks[0].size_mib = 488386; b.screen = SC_MODE;
     render_png(&b, dir, "14-mode-alongside-unavailable");
+
+    /* ★ 键盘焦点也离线渲一张 —— 焦点框的位置/大小只能靠眼睛验，
+     *   而它是"支持键盘"这件事唯一看得见的部分。 */
+    g_kbd_used = true;
+    a.screen = SC_MODE; a.mode_wipe = true; a.hold = 0;
+    {   /* 先画一遍把 hit 表建起来，才知道焦点该落在第几个控件上 */
+        cairo_surface_t *s0 = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 8, 8);
+        cairo_t *c0 = cairo_create(s0); draw(c0, &a); cairo_destroy(c0);
+        cairo_surface_destroy(s0);
+    }
+    g_focus = 1;   /* 第二个控件：右边那张卡片 */
+    render_png(&a, dir, "15-keyboard-focus");
+    g_kbd_used = false; g_focus = -1;
     return 0;
 }
 
@@ -745,4 +773,140 @@ int main(int argc, char **argv)
     fprintf(stderr, "这个构建没有 DRM 后端。用 --png-dir 做离线渲染，或者用 -DGK3_DRM 重新编译。\n");
     return 2;
 #endif
+}
+
+/* ── 键盘与焦点 ────────────────────────────────────────────────────────────
+ *
+ * ★ 焦点顺序就是【控件登记顺序】—— g_hits 本来就是按屏幕上的顺序 hit_add 的，
+ *   所以不需要另建一张表。少一份状态就少一处会不同步的地方。
+ *
+ * ⚠️ 焦点框【只在用过键盘之后才画】。纯触摸的用户看到一个莫名其妙的高亮框
+ *   会以为自己误触了什么。
+ */
+
+static void focus_move(int dir)
+{
+    if (g_nhits == 0) { g_focus = -1; return; }
+    int n = g_nhits, start = g_focus;
+    for (int step = 0; step < n; step++) {
+        start = (start + dir + n) % n;
+        if (g_hits[start].enabled) { g_focus = start; return; }
+    }
+    g_focus = -1;
+}
+
+/* Linux 的 KEY_* → 字符。够用就好：WiFi 密码和数字。
+ * ⚠️ 只做 US 布局。别的布局要靠 xkb，而这个安装器里没有 X 也没有 xkb —— 
+ *    与其做半套，不如说清楚只支持 US 键位。 */
+static char key_to_char(unsigned code, bool shift)
+{
+    static const char lo[] = "\0\0" "1234567890-=" "\0\0" "qwertyuiop[]" "\0\0"
+                             "asdfghjkl;'`" "\0" "\zxcvbnm,./";
+    static const char up[] = "\0\0" "!@#$%^&*()_+" "\0\0" "QWERTYUIOP{}" "\0\0"
+                             "ASDFGHJKL:\"~" "\0" "|ZXCVBNM<>?";
+    if (code == 57) return ' ';                    /* KEY_SPACE */
+    if (code < sizeof lo - 1) {
+        char c = shift ? up[code] : lo[code];
+        if (c) return c;
+    }
+    return 0;
+}
+
+/* 一个能输字的框。焦点在它上面时，字符会进 buf。 */
+struct Field { char buf[128]; int len; bool secret; };
+
+static void field_draw(cairo_t *cr, double x, double y, double w, double h,
+                       Field *f, int id, const char *placeholder)
+{
+    int idx = g_nhits;
+    bool focused = (g_kbd_used && g_focus == idx);
+    rrect(cr, x, y, w, h, 12);
+    set_col(cr, C_SURF2); cairo_fill(cr);
+    rrect(cr, x, y, w, h, 12);
+    set_col(cr, focused ? C_ACCENT : C_LINE);
+    cairo_set_line_width(cr, focused ? 3 : 2); cairo_stroke(cr);
+
+    char shown[160];
+    if (f->len == 0) {
+        snprintf(shown, sizeof shown, "%s", placeholder ? placeholder : "");
+    } else if (f->secret) {
+        int n = f->len < (int)sizeof shown - 1 ? f->len : (int)sizeof shown - 1;
+        for (int i = 0; i < n; i++) shown[i] = '*';
+        shown[n] = 0;
+    } else {
+        snprintf(shown, sizeof shown, "%s", f->buf);
+    }
+    double th = text_h(cr, w - 32, 19, shown[0] ? shown : " ");
+    text(cr, x + 16, y + (h - th) / 2, w - 32, 19,
+         f->len ? C_TEXT : C_MUTED, "left", "%s", shown);
+    /* 光标：只在有焦点时画 */
+    if (focused) {
+        cairo_rectangle(cr, x + w - 20, y + 12, 3, h - 24);
+        set_col(cr, C_ACCENT); cairo_fill(cr);
+        g_field_focused = f;      /* 让 ui_key 知道字符该进哪个框 */
+    }
+    hit_add(x, y, w, h, id, true);
+}
+
+static void field_key(Field *f, unsigned code, bool shift)
+{
+    if (code == 14) {                 /* KEY_BACKSPACE */
+        if (f->len > 0) f->buf[--f->len] = 0;
+        return;
+    }
+    char c = key_to_char(code, shift);
+    if (c && f->len < (int)sizeof f->buf - 1) {
+        f->buf[f->len++] = c;
+        f->buf[f->len] = 0;
+    }
+}
+
+/* 焦点框：画在最后，所以对每一种控件都自动生效 —— 不用去每个控件里加代码 */
+static void focus_ring(cairo_t *cr)
+{
+    if (!g_kbd_used || g_focus < 0 || g_focus >= g_nhits) return;
+    Hit *t = &g_hits[g_focus];
+    rrect(cr, t->x - 5, t->y - 5, t->w + 10, t->h + 10, 18);
+    set_col(cr, C_ACCENT);
+    cairo_set_line_width(cr, 3);
+    double dash[] = { 8, 6 };
+    cairo_set_dash(cr, dash, 2, 0);
+    cairo_stroke(cr);
+    cairo_set_dash(cr, NULL, 0, 0);
+}
+
+/* 键盘事件入口。返回 true 表示要重绘。
+ *
+ * ⚠️ 键码是 Linux 的 KEY_*（<linux/input-event-codes.h>），不是 ASCII。
+ *    这里写成数字而不是包含那个头文件，是因为 PNG 构建（宿主）不该为了
+ *    几个常量去依赖内核头。
+ */
+static bool ui_key(App *a, unsigned code, bool shift)
+{
+    g_kbd_used = true;
+    switch (code) {
+        case 15:                                  /* TAB */
+            focus_move(shift ? -1 : 1); return true;
+        case 108: case 106:                       /* DOWN / RIGHT */
+            focus_move(1); return true;
+        case 103: case 105:                       /* UP / LEFT */
+            focus_move(-1); return true;
+        case 1:                                   /* ESC = 返回 */
+            return on_tap(a, ID_BACK);
+        case 28: case 96: {                       /* ENTER / 小键盘 ENTER */
+            int id = (g_focus >= 0 && g_focus < g_nhits) ? g_hits[g_focus].id : ID_NONE;
+            /* 确认页那个红条要"按住"，不能靠敲一下回车就动盘 —— 交给
+             * 调用方按住 Enter 的逻辑处理，这里不当作点击。 */
+            if (id == ID_CONFIRM_HOLD) return false;
+            if (id != ID_NONE) return on_tap(a, id);
+            return false;
+        }
+        default: break;
+    }
+    /* 其余按键：如果焦点在输入框上，就当成输入 */
+    if (g_field_focused) {
+        field_key(g_field_focused, code, shift);
+        return true;
+    }
+    return false;
 }
