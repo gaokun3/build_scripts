@@ -37,6 +37,14 @@ start() {
         for f in /media/gk3/gaokun3/wpa_supplicant.conf /etc/wpa_supplicant/wpa_supplicant.conf; do
             [ -f "$f" ] && echo "  有: $f" || echo "  无: $f"
         done
+        echo; echo "=== 显示输出（DRM）==="
+        for c in /sys/class/drm/card*-*; do
+            [ -e "$c/status" ] || continue
+            echo "  $(basename "$c"): $(cat "$c/status" 2>/dev/null)"
+            [ -f "$c/modes" ] && sed "s/^/    mode /" "$c/modes" 2>/dev/null | head -4
+        done
+        echo "=== 输入设备（触摸/键盘）==="; cat /proc/bus/input/devices 2>/dev/null | grep -E "^N:|^H:" | head -20
+        echo; echo "=== 安装器日志 ==="; tail -30 /var/log/gk3-installer.log 2>/dev/null
         echo; echo "=== 进程 ==="; ps -o pid,args 2>&1 | head -40
         echo; echo "=== sshd 生效配置 ==="; /usr/sbin/sshd -T 2>&1 | grep -iE "^(port|permitrootlogin|pubkeyauth|passwordauth|authorizedkeysfile|usepam|strictmodes)" 
         echo; echo "=== root 账户 ==="; getent passwd root; grep '^root:' /etc/shadow
