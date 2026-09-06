@@ -7,6 +7,23 @@
 set -u
 OUT="${1:?用法: $0 <kernel-out-dir>}"
 
+# A fresh buildbot defconfig leaves the audio/RPMSG parent stacks as modules.
+# Enabling their leaf drivers alone cannot override those tristate dependencies.
+# Keep the complete DSP/audio transport built in on Android, which has no
+# module loading stage for this board.
+./scripts/config --file "$OUT/.config" \
+    --enable SOUND --enable SND --enable SND_SOC --enable SND_SOC_QCOM --enable SOUNDWIRE \
+    --enable RPMSG --enable RPMSG_QCOM_GLINK --enable RPMSG_QCOM_GLINK_SMEM \
+    --enable QCOM_Q6V5_ADSP --enable QCOM_Q6V5_PAS --enable QCOM_SYSMON \
+    --enable RPMSG_QCOM_SMD --enable QCOM_PD_MAPPER \
+    --enable QCOM_LLCC --enable QCOM_APR --enable QCOM_PDR_HELPERS \
+    --enable QCOM_PMIC_GLINK \
+    --enable SND_SOC_SC8280XP --enable SND_SOC_QDSP6 \
+    --enable SND_SOC_WSA883X --enable SND_SOC_WCD938X \
+    --enable SND_SOC_WCD938X_SDW --enable SOUNDWIRE_QCOM \
+    --enable SND_SOC_LPASS_RX_MACRO --enable SND_SOC_LPASS_TX_MACRO \
+    --enable SND_SOC_LPASS_VA_MACRO --enable SND_SOC_LPASS_WSA_MACRO
+
 ./scripts/config --file "$OUT/.config" \
     `# —— 动态分区：first-stage init 在 ramdisk 里就要用 DM，而 ramdisk 里没有模块 ——` \
     --enable BLK_DEV_DM --enable DM_VERITY --enable DM_BUFIO --enable DM_SNAPSHOT \

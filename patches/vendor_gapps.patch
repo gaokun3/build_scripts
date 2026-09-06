@@ -1,0 +1,65 @@
+diff --git a/arm64/Android.bp b/arm64/Android.bp
+index 5646a29..e942c16 100644
+--- a/arm64/Android.bp
++++ b/arm64/Android.bp
+@@ -106,10 +106,3 @@ android_app_import {
+     },
+     product_specific: true,
+ }
+-
+-cc_prebuilt_library_shared {
+-    name: "libjni_latinimegoogle",
+-    srcs: ["proprietary/product/lib64/libjni_latinimegoogle.so"],
+-    prefer: true,
+-    product_specific: true,
+-}
+diff --git a/arm64/arm64-vendor.mk b/arm64/arm64-vendor.mk
+index af0154a..64b985c 100644
+--- a/arm64/arm64-vendor.mk
++++ b/arm64/arm64-vendor.mk
+@@ -6,13 +6,11 @@ PRODUCT_SOONG_NAMESPACES += \
+ 
+ PRODUCT_PACKAGES += \
+     GmsCore \
+-    Phonesky \
+-    libjni_latinimegoogle
++    Phonesky
+ 
+ ifeq ($(TARGET_IS_GROUPER),)
+ PRODUCT_PACKAGES += \
+     MarkupGoogle_v2 \
+-    SetupWizard \
+     SpeechServicesByGoogle \
+     Velvet \
+     talkback
+diff --git a/common/Android.bp b/common/Android.bp
+index 530614b..a23d56b 100644
+--- a/common/Android.bp
++++ b/common/Android.bp
+@@ -180,14 +180,6 @@ prebuilt_etc {
+     product_specific: true,
+ }
+ 
+-prebuilt_etc {
+-    name: "google.xml",
+-    src: "proprietary/product/etc/sysconfig/google.xml",
+-    relative_install_path: "sysconfig",
+-    filename_from_src: true,
+-    product_specific: true,
+-}
+-
+ prebuilt_etc {
+     name: "privapp-permissions-google-product.xml",
+     src: "proprietary/product/etc/permissions/privapp-permissions-google-product.xml",
+diff --git a/common/common-vendor.mk b/common/common-vendor.mk
+index ba808c9..c0aaaba 100644
+--- a/common/common-vendor.mk
++++ b/common/common-vendor.mk
+@@ -20,7 +20,6 @@ PRODUCT_PACKAGES += \
+     gapps.rc \
+     gms_fsverity_cert.der \
+     google-hiddenapi-package-allowlist.xml \
+-    google.xml \
+     privapp-permissions-google-product.xml \
+     privapp-permissions-google-system-ext.xml \
+     privapp-permissions-mtg.xml \
