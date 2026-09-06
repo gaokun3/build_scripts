@@ -15,9 +15,10 @@ bison, libssl-dev and libelf-dev. It uses the committed
 `gaokun3_android_defconfig`; no kernel patch script is required after sync.
 
 Device-specific source changes are committed in the corresponding public
-forks. Two preparation operations remain: relocate Mesa's generated
-absolute build paths to the current checkout (the original generator bypasses
-the Soong sandbox), and apply the small GApps integration patch. GApps follows its GitLab baklava branch because its history contains APKs larger than
+forks. Mesa build rules use declared inputs inside the Soong sandbox and
+need no checkout-path rewriting. `prepare.sh` applies the small GApps
+integration patch and removes dangling date/tar wrappers in minimal checkouts.
+GApps follows its GitLab baklava branch because its history contains APKs larger than
 GitHub's regular Git file limit. `prepare.sh` checks the patch before applying
 it and is safe to rerun.
 
@@ -36,7 +37,7 @@ installer and forensic tools remain available in the original repository.
 The source fixes are committed in the corresponding forks. The kernel uses
 its committed `gaokun3_android_defconfig`; legacy patch-application, configuration
 mutation and device-side OTA verification scripts are not needed in this build
-repository. `relocate-mesa-paths.py` remains because `prepare.sh` calls it.
+repository. Mesa path handling is maintained in the Mesa fork itself.
 
 Kernel base: `gregkh/linux`, branch `linux-rolling-stable`, with gaokun device
 support migrated from the local Linux 7.2 tree and the Android configuration.
