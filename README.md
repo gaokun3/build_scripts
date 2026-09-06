@@ -14,8 +14,8 @@ bash tools/gaokun/build-android.sh "$PWD"
 bison, libssl-dev and libelf-dev. It uses the committed
 `gaokun3_android_defconfig`; no kernel patch script is required after sync.
 
-Device-specific source changes are committed in the corresponding private
-repositories. Two preparation operations remain: relocate Mesa's generated
+Device-specific source changes are committed in the corresponding public
+forks. Two preparation operations remain: relocate Mesa's generated
 absolute build paths to the current checkout (the original generator bypasses
 the Soong sandbox), and apply the small GApps integration patch. GApps follows its GitLab baklava branch because its history contains APKs larger than
 GitHub's regular Git file limit. `prepare.sh` checks the patch before applying
