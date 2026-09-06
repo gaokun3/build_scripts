@@ -3,7 +3,7 @@
 crDroid 16.0 / Huawei MateBook E Go. Sources and setup instructions live in
 [`gaokun3/local_manifests`](https://github.com/gaokun3/local_manifests).
 
-After syncing the pinned manifest and supplying the device firmware:
+After syncing crDroid with the gaokun3 local manifests and supplying the device firmware:
 
 ```sh
 bash tools/gaokun/build-kernel.sh "$PWD"
@@ -17,8 +17,7 @@ bison, libssl-dev and libelf-dev. It uses the committed
 Device-specific source changes are committed in the corresponding private
 repositories. Two preparation operations remain: relocate Mesa's generated
 absolute build paths to the current checkout (the original generator bypasses
-the Soong sandbox), and apply the small GApps integration patch. GApps stays
-at its pinned GitLab source because its history contains APKs larger than
+the Soong sandbox), and apply the small GApps integration patch. GApps follows its GitLab baklava branch because its history contains APKs larger than
 GitHub's regular Git file limit. `prepare.sh` checks the patch before applying
 it and is safe to rerun.
 
