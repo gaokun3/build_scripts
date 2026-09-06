@@ -33,8 +33,10 @@ Imported from `vahiru/gaokun-android` at
 `2f2b903` (2026-09-06 checkout). Original history and licensing are retained.
 The working tree is reduced to build tooling; upstream deployment, flashing,
 installer and forensic tools remain available in the original repository.
-The archived `crdroid-tree-fixes.py` documents the source patches; do not run
-it as a substitute for syncing the patched repositories.
+The source fixes are committed in the corresponding forks. The kernel uses
+its committed `gaokun3_android_defconfig`; legacy patch-application, configuration
+mutation and device-side OTA verification scripts are not needed in this build
+repository. `relocate-mesa-paths.py` remains because `prepare.sh` calls it.
 
 Kernel base: `gregkh/linux`, branch `linux-rolling-stable`, with gaokun device
 support migrated from the local Linux 7.2 tree and the Android configuration.

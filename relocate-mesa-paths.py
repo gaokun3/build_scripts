@@ -26,7 +26,7 @@ meson_to_hermetic 的生成器会把若干路径以**绝对路径**写进 genrul
 幂等：把任何形如 `<abs>/external/mesa3d` 的前缀统一改写成当前树的实际路径，
 所以对已经正确的文件是空操作。
 
-用法: mesa-relocate-abs-paths.py [<tree-root>]      默认 ~/crdroid
+用法: relocate-mesa-paths.py [<tree-root>]      默认 ~/crdroid
 """
 import io
 import os
