@@ -1,3 +1,22 @@
+MindTheGapps integration for crDroid 16.0 / gaokun3
+
+Original implementation: Vahiru <nekovahiru@gmail.com>
+Source: https://github.com/vahiru/gaokun-android/blob/909c813/scripts/crdroid-tree-fixes.py
+Function: patch_gapps_conflicts
+
+Required while vendor/gapps is included:
+- Drop the duplicate libjni_latinimegoogle module and package entry; LatinIME
+  already defines it in packages/inputmethods/LatinIME/java/Android.bp.
+- Drop google.xml and its package entry; vendor/addons/config.mk already
+  installs product/etc/sysconfig/google.xml. Both the module definition and
+  the package entry must be removed to avoid duplicate install rules.
+
+Reference-project policy (optional for compilation):
+- Omit Google's SetupWizard to avoid a Google-network-dependent first boot.
+  crDroid's LineageSetupWizard remains enabled.
+
+This patch is unnecessary if MindTheGapps is not included in the build.
+
 diff --git a/arm64/Android.bp b/arm64/Android.bp
 index 5646a29..e942c16 100644
 --- a/arm64/Android.bp
